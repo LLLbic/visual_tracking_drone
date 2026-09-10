@@ -16,6 +16,19 @@ class VideoConfig:
 
 
 @dataclass(slots=True)
+class FrameInterpolationConfig:
+    """Experimental NVIDIA FRUC stage between capture and detection."""
+
+    enabled: bool = False
+    backend: str = "nvidia_fruc"
+    sdk_root: str = "D:/NVToolKits/Optical_Flow_SDK_5.0.7/Optical_Flow_SDK_5.0.7"
+    native_library: str = ".runtime/nvof-fruc/nvof_fruc_bridge.dll"
+    device_id: int = 0
+    multiplier: int = 2
+    yolo_on_synthetic: bool = False
+
+
+@dataclass(slots=True)
 class VisionConfig:
     enabled: bool = True
     model_path: str = "yolo11n.pt"
@@ -170,6 +183,7 @@ class ServerConfig:
 @dataclass(slots=True)
 class AppConfig:
     video: VideoConfig
+    frame_interpolation: FrameInterpolationConfig
     vision: VisionConfig
     vision_models: dict[str, VisionModelProfile]
     mavlink_router: MavlinkRouterConfig
@@ -200,6 +214,21 @@ def load_config(path: str | Path) -> AppConfig:
     video.transport = video.transport.casefold()
     if video.transport not in {"tcp", "udp"}:
         raise ValueError("video.transport must be either tcp or udp")
+
+    interpolation = _load_section(
+        FrameInterpolationConfig, raw.get("frame_interpolation", {})
+    )
+    interpolation.backend = interpolation.backend.casefold()
+    if interpolation.backend != "nvidia_fruc":
+        raise ValueError("frame_interpolation.backend must be nvidia_fruc")
+    if interpolation.multiplier != 2:
+        raise ValueError("NVIDIA FRUC experiment currently supports multiplier=2 only")
+    if interpolation.device_id < 0:
+        raise ValueError("frame_interpolation.device_id must be non-negative")
+    if interpolation.yolo_on_synthetic:
+        raise ValueError(
+            "Live YOLO/control on synthetic frames is forbidden; use the offline A/B benchmark"
+        )
 
     control = _load_section(ControlConfig, raw.get("control", {}))
     if control.transmit_enabled:
@@ -364,6 +393,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     return AppConfig(
         video=video,
+        frame_interpolation=interpolation,
         vision=vision,
         vision_models=vision_models,
         mavlink_router=router,

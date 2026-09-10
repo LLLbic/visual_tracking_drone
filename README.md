@@ -4,6 +4,8 @@
 
 当前默认视觉目标已改为红色铁桶。使用官方 `YOLOE-26s-seg` 的开放词汇提示 `red metal barrel / red oil drum / red barrel` 找出候选框，再要求框内 HSV 红色像素占比至少为 8%。页面“视觉模型切换”可在红桶准确版（26s）、红桶快速版（26n）、人员和 COCO 通用模型之间即时切换；切换时自动取消旧目标锁定。模型列表由 `config.toml` 的 `[vision_models.*]` 表维护，网页不能提交任意本地路径或网络地址。
 
+当前 `experiment/nvidia-optical-flow-sdk` 分支额外启用 NVIDIA Optical Flow SDK 的 FRUC 2× 插帧实验。合成帧只用于网页预览；YOLO、目标锁定、PID 与飞控链路仍只接受真实帧。构建方法、A/B 测试命令与局限见 [docs/NVIDIA_FRUC_EXPERIMENT.md](docs/NVIDIA_FRUC_EXPERIMENT.md)。
+
 ## 已固化的安全要求
 
 - 不修改任何 PX4 参数。

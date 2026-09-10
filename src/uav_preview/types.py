@@ -160,6 +160,14 @@ class VisionSnapshot:
     height: int = 0
     capture_fps: float = 0.0
     processing_fps: float = 0.0
+    output_fps: float = 0.0
+    interpolation_enabled: bool = False
+    interpolation_ready: bool = False
+    interpolation_backend: str = ""
+    interpolation_error: str = ""
+    interpolation_ms: float = 0.0
+    synthetic_frames: int = 0
+    repeated_synthetic_frames: int = 0
     detector_ready: bool = False
     capture_error: str = ""
     reconnect_count: int = 0
@@ -182,6 +190,14 @@ class VisionSnapshot:
             "height": self.height,
             "capture_fps": self.capture_fps,
             "processing_fps": self.processing_fps,
+            "output_fps": self.output_fps,
+            "interpolation_enabled": self.interpolation_enabled,
+            "interpolation_ready": self.interpolation_ready,
+            "interpolation_backend": self.interpolation_backend,
+            "interpolation_error": self.interpolation_error,
+            "interpolation_ms": self.interpolation_ms,
+            "synthetic_frames": self.synthetic_frames,
+            "repeated_synthetic_frames": self.repeated_synthetic_frames,
             "detector_ready": self.detector_ready,
             "capture_error": self.capture_error,
             "reconnect_count": self.reconnect_count,

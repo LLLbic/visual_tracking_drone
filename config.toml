@@ -9,6 +9,17 @@ transport = "tcp"
 reconnect_seconds = 2.0
 jpeg_quality = 82
 
+[frame_interpolation]
+# 实验分支：NVIDIA NVOFA/FRUC在相邻真实帧之间生成一个中间帧（5 FPS -> 10 FPS）。
+# 插值帧仅进入网页预览，不进入YOLO决策、PID或任何飞控发送链路。
+enabled = true
+backend = "nvidia_fruc"
+sdk_root = "D:/NVToolKits/Optical_Flow_SDK_5.0.7/Optical_Flow_SDK_5.0.7"
+native_library = ".runtime/nvof-fruc/nvof_fruc_bridge.dll"
+device_id = 0
+multiplier = 2
+yolo_on_synthetic = false
+
 [vision]
 enabled = true
 # 兼容字段；实际模型由下方 vision_models 注册表和 active_model 选择。

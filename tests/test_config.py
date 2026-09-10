@@ -28,6 +28,23 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exactly 5.0 Hz"):
                 load_config(path)
 
+    def test_fruc_live_path_rejects_yolo_on_synthetic_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unsafe-fruc.toml"
+            path.write_text(
+                "[frame_interpolation]\nenabled = true\nyolo_on_synthetic = true\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "synthetic frames is forbidden"):
+                load_config(path)
+
+    def test_fruc_multiplier_is_currently_fixed_at_two(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad-fruc-rate.toml"
+            path.write_text("[frame_interpolation]\nmultiplier = 4\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "multiplier=2"):
+                load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

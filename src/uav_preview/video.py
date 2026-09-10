@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from collections import deque
 from math import hypot
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Iterator
 
 from .config import AppConfig
 from .controller import PreviewController
+from .frame_interpolation import InterpolatedFrame, NvidiaFrucInterpolator
 from .telemetry import PassiveMavlinkReceiver
 from .types import CommandPreview, DetectedTrack, TargetSnapshot, VisionSnapshot
 from .vision import SingleObjectTracker, UltralyticsTrackDetector, choose_reacquisition_candidate
@@ -31,8 +33,15 @@ class VideoTrackingEngine:
         self._state_lock = Lock()
         self._thread: Thread | None = None
         self._jpeg: bytes | None = None
+        self._jpeg_history: deque[tuple[int, bytes]] = deque(maxlen=8)
         self._frame_serial = 0
-        self._vision = VisionSnapshot(source=config.video.source)
+        self._vision = VisionSnapshot(
+            source=config.video.source,
+            interpolation_enabled=config.frame_interpolation.enabled,
+            interpolation_backend=(
+                config.frame_interpolation.backend if config.frame_interpolation.enabled else ""
+            ),
+        )
         self._preview = CommandPreview()
         self._locked_track: DetectedTrack | None = None
         self._requested_click: tuple[float, float] | None = None
@@ -84,21 +93,36 @@ class VideoTrackingEngine:
 
     def mjpeg(self) -> Iterator[bytes]:
         last_serial = -1
+        last_yield = 0.0
         while not self._stop.is_set():
             with self._condition:
                 self._condition.wait_for(
                     lambda: self._frame_serial != last_serial or self._stop.is_set(),
                     timeout=1.0,
                 )
-                jpeg = self._jpeg
-                last_serial = self._frame_serial
+                available = [item for item in self._jpeg_history if item[0] > last_serial]
+                if available:
+                    serial, jpeg = available[0]
+                    last_serial = serial
+                else:
+                    jpeg = self._jpeg
+                    last_serial = self._frame_serial
             if jpeg:
+                with self._state_lock:
+                    capture_fps = self._vision.capture_fps
+                if self.config.frame_interpolation.enabled and capture_fps > 0:
+                    minimum_interval = 1.0 / max(1.0, capture_fps * 2.0)
+                    remaining = minimum_interval - (monotonic() - last_yield)
+                    if remaining > 0:
+                        sleep(remaining)
                 yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                last_yield = monotonic()
 
     def _publish_jpeg(self, jpeg: bytes) -> None:
         with self._condition:
             self._jpeg = jpeg
             self._frame_serial += 1
+            self._jpeg_history.append((self._frame_serial, jpeg))
             self._condition.notify_all()
 
     def _capture_source(self) -> int | str:
@@ -165,6 +189,12 @@ class VideoTrackingEngine:
 
             started = monotonic()
             processed = 0
+            rendered = 0
+            interpolator = (
+                NvidiaFrucInterpolator(self.config.frame_interpolation)
+                if self.config.frame_interpolation.enabled
+                else None
+            )
             while not self._stop.is_set():
                 ok, frame = capture.read()
                 if not ok or frame is None:
@@ -173,15 +203,35 @@ class VideoTrackingEngine:
                         self._vision.capture_error = "RTSP读取超时或数据中断，正在重连"
                         self._vision.reconnect_count += 1
                     break
+                if interpolator is not None:
+                    try:
+                        synthetic = interpolator.push(frame, monotonic())
+                        with self._state_lock:
+                            self._vision.interpolation_ready = interpolator.ready
+                            self._vision.interpolation_error = interpolator.error
+                        if synthetic is not None:
+                            self._process_synthetic_preview(cv2, synthetic)
+                            rendered += 1
+                    except Exception as exc:
+                        with self._state_lock:
+                            self._vision.interpolation_ready = False
+                            self._vision.interpolation_error = str(exc)
+                        interpolator.close()
+                        interpolator = None
                 self._process_frame(cv2, frame, detector, single_tracker)
                 processed += 1
+                rendered += 1
                 elapsed = monotonic() - started
                 if elapsed >= 1.0:
                     with self._state_lock:
                         self._vision.processing_fps = processed / elapsed
+                        self._vision.output_fps = rendered / elapsed
                     processed = 0
+                    rendered = 0
                     started = monotonic()
             capture.release()
+            if interpolator is not None:
+                interpolator.close()
             single_tracker.clear()
             with self._state_lock:
                 self._vision.connected = False
@@ -193,6 +243,38 @@ class VideoTrackingEngine:
                 if not has_previous_frame:
                     self._show_placeholder(cv2, np, "RTSP INTERRUPTED - RECONNECTING", self.config.video.source)
                 sleep(self.config.video.reconnect_seconds)
+
+    def _process_synthetic_preview(self, cv2: object, synthetic: InterpolatedFrame) -> None:
+        frame = synthetic.frame
+        with self._state_lock:
+            tracks = [replace(track) for track in self._vision.tracks]
+            locked = replace(self._locked_track) if self._locked_track is not None else None
+            target = replace(self._vision.target)
+            preview = replace(self._preview)
+        self._draw_overlay(cv2, frame, tracks, locked, target, preview)
+        cv2.putText(
+            frame,
+            "NVIDIA FRUC SYNTHETIC PREVIEW - YOLO/CONTROL USE REAL FRAMES ONLY",
+            (18, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 190, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        encode_ok, encoded = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), int(self.config.video.jpeg_quality)],
+        )
+        if encode_ok:
+            self._publish_jpeg(encoded.tobytes())
+        with self._state_lock:
+            self._vision.interpolation_ready = True
+            self._vision.interpolation_ms = synthetic.elapsed_ms
+            self._vision.synthetic_frames += 1
+            if synthetic.repeated:
+                self._vision.repeated_synthetic_frames += 1
 
     def _process_frame(self, cv2: object, frame: object, detector: UltralyticsTrackDetector, single_tracker: SingleObjectTracker) -> None:
         height, width = frame.shape[:2]
