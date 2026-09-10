@@ -1,0 +1,13 @@
+.venv/
+.uv-cache/
+.runtime/
+logs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+*.pt
+mobileclip*.ts
+.mobileclip*.part
+*.onnx
+*.engine

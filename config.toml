@@ -1,0 +1,149 @@
+# 视觉跟踪控制仍为只读预览；另有默认关闭的地面 Offboard 零速度测试通道。
+# 即使将 control.transmit_enabled 改为 true，程序也会拒绝启动。
+
+[video]
+# D7 机内摄像头原始码流。电脑需要在连接数传的以太网上具备
+# 192.168.111.0/24 的直连地址或明确路由，才能真正拉到该视频。
+source = "rtsp://192.168.111.11:554/user=admin&password=&channel=1&stream=1.sdp?real_stream"
+transport = "tcp"
+reconnect_seconds = 2.0
+jpeg_quality = 82
+
+[vision]
+enabled = true
+# 兼容字段；实际模型由下方 vision_models 注册表和 active_model 选择。
+model_path = "yolo26n.pt"
+active_model = "red_barrel"
+device = "cuda:0"
+target_class_names = ["person"]
+target_class_ids = []
+confidence = 0.35
+iou = 0.55
+detector_every_n_frames = 3
+multi_object_tracker = "bytetrack.yaml"
+
+# 锁定目标后，在两次 YOLO 之间使用的高频单目标跟踪器：csrt 或 dasiamrpn。
+single_object_tracker = "csrt"
+dasiamrpn_model = ""
+dasiamrpn_kernel_cls1 = ""
+dasiamrpn_kernel_r1 = ""
+reacquire_max_center_distance = 0.22
+reacquire_max_height_change = 0.45
+max_target_lost_frames = 12
+
+[vision_models.red_barrel]
+label = "红色铁桶（YOLOE-26s + HSV，推荐）"
+model_path = "yoloe-26s-seg.pt"
+kind = "yoloe"
+prompts = ["red metal barrel", "red oil drum", "red barrel"]
+target_class_names = []
+target_class_ids = []
+red_color_filter = true
+min_red_ratio = 0.08
+
+[vision_models.red_barrel_fast]
+label = "红色铁桶（YOLOE-26n + HSV，快速）"
+model_path = "yoloe-26n-seg.pt"
+kind = "yoloe"
+prompts = ["red metal barrel", "red oil drum", "red barrel"]
+target_class_names = []
+target_class_ids = []
+red_color_filter = true
+min_red_ratio = 0.08
+
+[vision_models.person]
+label = "人员（YOLO26n，仅预览）"
+model_path = "yolo26n.pt"
+kind = "yolo"
+prompts = []
+target_class_names = ["person"]
+target_class_ids = []
+red_color_filter = false
+
+[vision_models.coco_all]
+label = "COCO 通用物体（YOLO26n）"
+model_path = "yolo26n.pt"
+kind = "yolo"
+prompts = []
+target_class_names = []
+target_class_ids = []
+red_color_filter = false
+
+[telemetry]
+enabled = true
+bind_host = "127.0.0.1"
+# 本地双向路由器把MiniHomer遥测复制到这里，网页不直接占用外部8080。
+bind_port = 14550
+stale_after_seconds = 1.5
+allowed_source_ips = ["127.0.0.1"]
+forward_qgc = false
+# 以下目标在当前架构中停用；保留是为了使配置可随时切换回内置分流模式。
+qgc_host = "127.0.0.1"
+qgc_port = 14550
+
+[mavlink_router]
+# 电脑端唯一的外部MAVLink会话。数传与飞控配置完全不变。
+enabled = true
+vehicle_bind_host = "0.0.0.0"
+vehicle_bind_port = 8080
+vehicle_host = "192.168.1.201"
+vehicle_port = 8080
+# QGC和网页都只能通过本机回环访问路由器。
+local_host = "127.0.0.1"
+local_ingress_port = 14560
+qgc_host = "127.0.0.1"
+qgc_port = 14551
+telemetry_host = "127.0.0.1"
+telemetry_port = 14550
+# 遥控器优先级硬保护：拦截电脑侧 MANUAL_CONTROL、RC 覆盖和未授权连续设定值；
+# 保留QGC显式模式切换、解锁、起降、返航、暂停/制动等高层操作。
+enforce_rc_priority = true
+vehicle_system_id = 1
+approved_setpoint_system = 245
+approved_setpoint_component = 191
+
+[control]
+# 安全硬限制：本阶段永远为 false，程序也没有任何 MAVSDK/RC 发送代码。
+transmit_enabled = false
+target_bbox_height_ratio = 0.42
+yaw_deadband = 0.04
+distance_deadband = 0.025
+yaw_kp = 36.0
+yaw_ki = 0.0
+yaw_kd = 4.0
+distance_kp = 1.35
+distance_ki = 0.0
+distance_kd = 0.12
+max_yaw_rate_deg_s = 28.0
+max_forward_speed_m_s = 1.0
+integral_limit = 0.5
+
+[ground_offboard_test]
+# 页面手动打开后，以 5 Hz 向本机双向路由器发送零速度设定值。
+# 稳定预发送满1.2秒后，只有飞手已手动切入OFFBOARD、飞机明确在地面且
+# 实体Kill Switch已解除时，网页ARM才会开放；本发送器本身不会切模式或解锁。
+available = true
+frequency_hz = 5.0
+arm_ready_after_seconds = 1.2
+uplink_host = "127.0.0.1"
+uplink_port = 14560
+target_system = 1
+target_component = 1
+source_system = 245
+source_component = 191
+
+[keyboard_control]
+# 默认关闭。ARMED + ON_GROUND + OFFBOARD时只允许Shift上升；飞控报告
+# IN_AIR后才开放全部方向。实体遥控器切出OFFBOARD可立即接管。
+available = true
+allow_ground_takeoff = true
+frequency_hz = 10.0
+input_timeout_seconds = 0.4
+auto_stop_seconds = 1.5
+max_horizontal_speed_m_s = 0.25
+max_vertical_speed_m_s = 0.20
+max_yaw_rate_deg_s = 10.0
+
+[server]
+host = "127.0.0.1"
+port = 8765

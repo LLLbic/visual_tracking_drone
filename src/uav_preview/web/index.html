@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>无人机视觉跟踪 · 地面联调</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1018; --panel:#141c28; --line:#273447; --text:#e8edf5; --muted:#91a0b5; --cyan:#54d7ff; --green:#54e39a; --amber:#ffc857; --red:#ff5f6d; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Inter,"Microsoft YaHei",system-ui,sans-serif; background:radial-gradient(circle at 20% 0,#152b3c 0,var(--bg) 42%); color:var(--text); }
+    header { padding:18px 24px 12px; display:flex; justify-content:space-between; align-items:flex-end; gap:20px; }
+    h1 { font-size:22px; margin:0; letter-spacing:.03em; }
+    .subtitle { color:var(--muted); font-size:13px; margin-top:6px; }
+    .tx-lock { background:rgba(255,200,87,.10); border:1px solid rgba(255,200,87,.48); color:#ffd989; padding:9px 13px; border-radius:9px; font-weight:700; white-space:nowrap; }
+    main { padding:10px 24px 28px; display:grid; grid-template-columns:minmax(520px,1.65fr) minmax(360px,.85fr); gap:16px; }
+    .panel { background:linear-gradient(155deg,rgba(24,34,48,.96),rgba(15,22,32,.96)); border:1px solid var(--line); border-radius:14px; box-shadow:0 14px 40px rgba(0,0,0,.22); }
+    .video-panel { overflow:hidden; }
+    .panel-title { padding:13px 15px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    .panel-title strong { font-size:14px; }
+    .badge { padding:4px 8px; border-radius:999px; background:#253247; color:#b9c6d8; font-size:12px; }
+    .video-stage { position:relative; aspect-ratio:16/9; overflow:hidden; background:#06090d; }
+    #video { width:100%; height:100%; display:block; object-fit:contain; cursor:crosshair; }
+    .flight-hud { position:relative; padding:12px 14px; border-top:1px solid rgba(133,219,255,.32); border-bottom:1px solid rgba(133,219,255,.20); background:rgba(8,15,24,.96); }
+    .hud-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px; font-size:12px; }
+    .hud-head strong { color:#dff7ff; }
+    .hud-head span { color:var(--muted); }
+    .channel-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px 12px; }
+    .channel { display:grid; grid-template-columns:92px minmax(80px,1fr) 42px; gap:8px; align-items:center; font-size:11px; }
+    .channel-label { color:#d7e3f2; white-space:nowrap; }
+    .channel-label small { color:var(--muted); }
+    .channel-track { position:relative; height:8px; border-radius:999px; background:linear-gradient(90deg,#42df91 0%,#ffc857 50%,#ff5f6d 100%); box-shadow:inset 0 0 0 1px rgba(255,255,255,.14); }
+    .channel-marker { position:absolute; top:50%; width:13px; height:13px; border:2px solid #fff; border-radius:50%; transform:translate(-50%,-50%); box-shadow:0 1px 6px #000; transition:left .04s linear; }
+    .channel-value { font:700 12px/1 ui-monospace,SFMono-Regular,Consolas,monospace; text-align:right; }
+    .hud-footer { display:flex; justify-content:space-between; gap:10px; align-items:center; margin-top:9px; flex-wrap:wrap; }
+    .key-guide { display:flex; gap:5px; flex-wrap:wrap; }
+    kbd { min-width:25px; padding:3px 6px; border:1px solid #50627b; border-bottom-width:2px; border-radius:5px; background:#172234; color:#cbd8e9; font:700 10px/1.1 ui-monospace,Consolas,monospace; text-align:center; }
+    kbd.active { color:#07120c; background:var(--green); border-color:#a9ffd1; }
+    .sim-actions { display:flex; gap:6px; align-items:center; }
+    .sim-actions button { padding:5px 8px; font-size:10px; background:#243249; }
+    .sim-actions button.danger { background:#681f2d; }
+    .laser-readout { color:#b7f4ff; font:700 12px/1 ui-monospace,Consolas,monospace; }
+    .sim-action-state { color:var(--amber); font-size:10px; }
+    .keyboard-uplink { display:flex; align-items:center; gap:8px; padding:5px 8px; border:1px solid #34435a; border-radius:9px; background:#0d141e; }
+    .keyboard-uplink .switch { transform:scale(.78); transform-origin:right center; margin-left:-8px; }
+    .hint { color:var(--muted); padding:10px 14px 13px; font-size:12px; display:flex; justify-content:space-between; gap:12px; }
+    .stack { display:grid; gap:16px; align-content:start; }
+    .grid { padding:13px; display:grid; grid-template-columns:repeat(3,1fr); gap:9px; }
+    .metric { padding:10px; background:rgba(9,14,21,.55); border:1px solid #202d3e; border-radius:10px; min-height:66px; }
+    .metric span { display:block; color:var(--muted); font-size:11px; margin-bottom:7px; }
+    .metric b { font:600 18px/1.1 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .wide { grid-column:span 3; }
+    .two { grid-column:span 2; }
+    .ok { color:var(--green)!important; } .warn { color:var(--amber)!important; } .bad { color:var(--red)!important; }
+    .controls { padding:13px; display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+    label { color:var(--muted); font-size:11px; display:grid; gap:5px; }
+    input, select { width:100%; border:1px solid #34435a; background:#0d141e; color:var(--text); border-radius:8px; padding:8px 9px; }
+    button { border:1px solid #3d4e67; background:#202d40; color:var(--text); border-radius:9px; padding:9px 11px; cursor:pointer; font-weight:650; }
+    button:hover:not(:disabled) { border-color:var(--cyan); }
+    button.danger { background:#481d28; border-color:#a33b4d; }
+    button:disabled { opacity:.38; cursor:not-allowed; }
+    .actions { padding:13px; display:grid; grid-template-columns:repeat(2,1fr); gap:9px; }
+    .note { grid-column:span 2; color:var(--muted); font-size:11px; line-height:1.55; }
+    #message { margin:0 13px 13px; min-height:20px; color:var(--amber); font-size:12px; overflow-wrap:anywhere; }
+    .offboard-test { padding:14px; display:grid; gap:12px; }
+    .toggle-row { display:flex; justify-content:space-between; gap:16px; align-items:center; }
+    .toggle-copy strong { display:block; font-size:14px; margin-bottom:5px; }
+    .toggle-copy small { color:var(--muted); line-height:1.5; }
+    .switch { position:relative; display:inline-block; width:54px; height:30px; flex:0 0 auto; }
+    .switch input { opacity:0; width:0; height:0; }
+    .slider { position:absolute; inset:0; cursor:pointer; background:#3b4656; border:1px solid #56647a; border-radius:999px; transition:.18s; }
+    .slider:before { content:""; position:absolute; width:22px; height:22px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.18s; }
+    .switch input:checked + .slider { background:#177c55; border-color:var(--green); box-shadow:0 0 0 3px rgba(84,227,154,.10); }
+    .switch input:checked + .slider:before { transform:translateX(24px); }
+    .switch input:disabled + .slider { opacity:.45; cursor:not-allowed; }
+    .offboard-status { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+    .ground-warning { color:#ffd989; background:rgba(255,200,87,.07); border:1px solid rgba(255,200,87,.22); border-radius:9px; padding:9px 10px; font-size:11px; line-height:1.55; }
+    .model-controls { padding:13px; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; }
+    .model-status { grid-column:span 2; color:var(--muted); font-size:12px; line-height:1.55; overflow-wrap:anywhere; }
+    .real-actions { padding:14px; display:grid; gap:12px; }
+    .real-action-dock { margin:0 12px 12px; border:1px solid #34435a; border-radius:12px; overflow:hidden; background:rgba(9,14,21,.72); }
+    .real-action-dock .panel-title { border-bottom:1px solid #2b394d; }
+    .safety-confirm { display:flex; align-items:flex-start; gap:9px; color:#ffd989; font-size:12px; line-height:1.5; }
+    .safety-confirm input { width:auto; margin:2px 0 0; accent-color:var(--amber); }
+    .real-action-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,1fr); gap:10px; align-items:stretch; }
+    .arm-control { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; background:#0d141e; border:1px solid #34435a; border-radius:10px; }
+    .arm-control strong { font-size:13px; }
+    .estop-control { background:#351922; border-color:#a33b4d; }
+    .command-state { color:var(--muted); font-size:11px; line-height:1.55; overflow-wrap:anywhere; }
+    @media (max-width:980px) { main { grid-template-columns:1fr; padding:8px 12px 22px; } header { padding:15px 13px 8px; align-items:flex-start; flex-direction:column; } .channel { grid-template-columns:74px minmax(65px,1fr) 39px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>无人机视觉目标跟踪工作台</h1><div class="subtitle">原生视频 · YOLO/ByteTrack · MAVLink 遥测 · 地面 Offboard 链路验证</div></div>
+    <div class="tx-lock">实体遥控器优先 · QGC高层操作保留</div>
+  </header>
+  <main>
+    <section class="panel video-panel">
+      <div class="panel-title"><strong>原始视频与视觉结果</strong><span id="vision-badge" class="badge">等待视频</span></div>
+      <div class="video-stage">
+        <img id="video" src="/video.mjpg" alt="视频流">
+      </div>
+      <div class="flight-hud" aria-label="本地键盘虚拟遥控器测试面板">
+          <div class="hud-head">
+            <strong>键盘Offboard速度控制 · 默认仅本地预览</strong>
+            <span id="keyboard-state">全部通道中立 1500</span>
+            <span class="laser-readout" id="laser-height">激光高度：无测距数据</span>
+          </div>
+          <div class="channel-grid">
+            <div class="channel"><span class="channel-label">Pitch <small>W/S</small></span><div class="channel-track"><i id="pitch-marker" class="channel-marker"></i></div><b id="pitch-channel" class="channel-value">1500</b></div>
+            <div class="channel"><span class="channel-label">Roll <small>A/D</small></span><div class="channel-track"><i id="roll-marker" class="channel-marker"></i></div><b id="roll-channel" class="channel-value">1500</b></div>
+            <div class="channel"><span class="channel-label">Throttle <small>⇧/Alt</small></span><div class="channel-track"><i id="throttle-marker" class="channel-marker"></i></div><b id="throttle-channel" class="channel-value">1500</b></div>
+            <div class="channel"><span class="channel-label">Yaw <small>Q/E</small></span><div class="channel-track"><i id="yaw-marker" class="channel-marker"></i></div><b id="yaw-channel" class="channel-value">1500</b></div>
+          </div>
+          <div class="hud-footer">
+            <div class="key-guide">
+              <kbd data-code="KeyW">W</kbd><kbd data-code="KeyS">S</kbd><kbd data-code="KeyA">A</kbd><kbd data-code="KeyD">D</kbd>
+              <kbd data-code="ShiftLeft">L-Shift</kbd><kbd data-code="AltLeft">L-Alt</kbd><kbd data-code="KeyQ">Q</kbd><kbd data-code="KeyE">E</kbd>
+            </div>
+            <div class="sim-actions">
+              <div class="keyboard-uplink">
+                <span id="keyboard-tx-state" class="sim-action-state">真实TX关闭</span>
+                <label class="switch" aria-label="键盘真实Offboard设定值发送开关"><input id="keyboard-control-toggle" type="checkbox" disabled><span class="slider"></span></label>
+              </div>
+              <button id="real-land" type="button" disabled>真实降落</button>
+              <button id="real-rtl" type="button" disabled>真实返航</button>
+            </div>
+          </div>
+          <div class="command-state" id="keyboard-command-state">地面起飞时仅Shift上升有效；飞控报告IN_AIR后才开放W/S/A/D/Alt/Q/E。</div>
+      </div>
+      <div class="real-action-dock">
+        <div class="panel-title"><strong>真实飞控动作</strong><span id="flight-action-badge" class="badge bad">安全锁定</span></div>
+        <div class="real-actions">
+          <label class="safety-confirm"><input id="real-action-confirm" type="checkbox"><span>我已确认旋翼已拆除或无人机位于隔离测试区，周围无人，实体遥控器在线并可立即接管。</span></label>
+          <div class="real-action-row">
+            <div class="arm-control">
+              <div><strong>ARM开关</strong><div class="command-state">真实COMMAND_LONG · 需要二次确认</div></div>
+              <label class="switch" aria-label="真实飞控ARM开关"><input id="real-arm-toggle" type="checkbox" disabled><span class="slider"></span></label>
+            </div>
+            <div class="arm-control estop-control">
+              <div><strong>紧急制动锁存</strong><div class="command-state">打开即锁住网页ARM；解除不会自动解锁</div></div>
+              <label class="switch" aria-label="真实紧急制动锁存开关"><input id="emergency-latch-toggle" type="checkbox" disabled><span class="slider"></span></label>
+            </div>
+          </div>
+          <div id="emergency-latch-state" class="command-state">急停状态：未锁存。地面打开时发送正常DISARM；空中打开时发送PX4 Pause。</div>
+          <div id="flight-action-state" class="command-state">等待安全确认。电脑起飞需先稳定发送零速度、由飞手手动切入OFFBOARD，再解除实体急停并ARM。</div>
+          <div id="command-ack" class="command-state">飞控确认：--</div>
+          <div class="ground-warning">这里的操作会真实发送给飞控。紧急制动锁存只禁止本网页ARM：地面发送正常DISARM，空中发送与QGC一致的PX4 Pause，不会直接停桨；它无法禁止实体遥控器或QGC解锁。键盘控制采用受保护的Offboard速度设定值，不修改PX4参数、不发送MANUAL_CONTROL或RC覆盖。</div>
+        </div>
+      </div>
+      <div class="hint"><span>点击当前模型产生的目标框进行锁定；切换模型会自动取消锁定。</span><span id="video-meta">--</span></div>
+    </section>
+    <div class="stack">
+      <section class="panel">
+        <div class="panel-title"><strong>飞控遥测（仅接收）</strong><span id="telemetry-badge" class="badge">未连接</span></div>
+        <div class="grid">
+          <div class="metric"><span>模式</span><b id="mode">--</b></div>
+          <div class="metric"><span>解锁</span><b id="armed">--</b></div>
+          <div class="metric"><span>高度</span><b id="alt">--</b></div>
+          <div class="metric"><span>Roll 横滚</span><b id="roll">--</b></div>
+          <div class="metric"><span>Pitch 俯仰</span><b id="pitch">--</b></div>
+          <div class="metric"><span>Yaw 偏航</span><b id="yaw">--</b></div>
+          <div class="metric"><span>Vx 北/前向</span><b id="vx">--</b></div>
+          <div class="metric"><span>Vy 东/右向</span><b id="vy">--</b></div>
+          <div class="metric"><span>Vz 向下</span><b id="vz">--</b></div>
+          <div class="metric"><span>油门</span><b id="throttle">--</b></div>
+          <div class="metric"><span>杆量 R/P</span><b id="stick-rp">--</b></div>
+          <div class="metric"><span>杆量 Y/T</span><b id="stick-yt">--</b></div>
+          <div class="metric wide"><span>RC CH5/解锁 · CH6/急停 · CH7/返航 · CH8/模式（原始 PWM，仅显示）</span><b id="rc-switches" style="font-size:13px">-- / -- / -- / --</b></div>
+          <div class="metric wide"><span>PX4 模式映射（只读）</span><b id="mode-mapping" style="font-size:13px">等待 QGC 参数读取</b></div>
+          <div class="metric wide"><span>PX4 最新状态提示</span><b id="status-text" style="font-size:13px">--</b></div>
+          <div class="metric wide"><span>来源与新鲜度</span><b id="source" style="font-size:13px">--</b></div>
+          <div class="metric wide"><span>遥测链路（本地双向路由 → QGC / 网页）</span><b id="relay" style="font-size:13px">--</b></div>
+          <div class="metric wide"><span>控制权限保护</span><b id="authority" style="font-size:13px">--</b></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><strong>视觉模型切换</strong><span id="model-badge" class="badge">等待模型</span></div>
+        <div class="model-controls">
+          <select id="model-select" aria-label="视觉模型"></select>
+          <button id="apply-model">切换模型</button>
+          <div id="model-status" class="model-status">正在读取可用模型……</div>
+          <div class="ground-warning model-status">默认使用“红色铁桶”：YOLOE-26s 先按文本提示寻找桶，再用 HSV 红色占比过滤；26n 是更快的备用项。切换模型会自动取消当前目标锁定；视觉控制仍只做预览。</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><strong>Offboard 起飞预备 / 零速度设定值</strong><span id="offboard-test-badge" class="badge">关闭</span></div>
+        <div class="offboard-test">
+          <div class="toggle-row">
+            <div class="toggle-copy">
+              <strong>手动发送开关</strong>
+              <small>先稳定预发送，再由飞手手动切入OFFBOARD；本开关不会切模式或ARM</small>
+            </div>
+            <label class="switch" aria-label="地面 Offboard 零速度设定值发送开关">
+              <input id="offboard-test-toggle" type="checkbox">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="offboard-status">
+            <div class="metric"><span>固定频率</span><b id="offboard-test-rate">5.0 Hz</b></div>
+            <div class="metric"><span>已发包</span><b id="offboard-test-packets">0</b></div>
+            <div class="metric"><span>最近发送</span><b id="offboard-test-age">--</b></div>
+            <div class="metric"><span>ARM预备</span><b id="offboard-test-ready">未就绪</b></div>
+          </div>
+          <div class="metric"><span>数传上行与当前状态</span><b id="offboard-test-state" style="font-size:13px">默认关闭</b></div>
+          <div class="ground-warning">安全边界：预备阶段只发送 vx=vy=vz=0（5 Hz），不会自行切换模式或ARM。稳定满1.2秒、飞手手动切入OFFBOARD、飞机明确ON_GROUND且实体急停已解除后，网页ARM才开放。ARM后电机可能按PX4设置怠速旋转；开启键盘TX后，飞控报告IN_AIR前只接受Shift上升。</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><strong>跟踪与控制预览</strong><span id="target-badge" class="badge">未锁定</span></div>
+        <div class="grid">
+          <div class="metric"><span>目标 ID</span><b id="target-id">--</b></div>
+          <div class="metric"><span>框高占比</span><b id="box-ratio">--</b></div>
+          <div class="metric"><span>水平误差</span><b id="center-error">--</b></div>
+          <div class="metric"><span>PID 前后建议</span><b id="preview-forward">0</b></div>
+          <div class="metric"><span>PID Yaw 建议</span><b id="preview-yaw">0</b></div>
+          <div class="metric"><span>实际已发送</span><b class="bad">0 / 0</b></div>
+          <div class="metric wide"><span>安全门状态</span><b id="gate" style="font-size:13px">--</b></div>
+        </div>
+        <div class="actions">
+          <button id="clear-target">取消锁定</button>
+          <div class="note">此区域只管理目标锁定与电脑端跟踪安全门。紧急制动锁存已经统一到视频下方的真实飞控动作区，不再保留重复按钮；程序不会自动切换模式。</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><strong>PID 与安全距离调节</strong><span class="badge">仅预览</span></div>
+        <div class="controls">
+          <label>目标框高占比<input id="target_bbox_height_ratio" type="number" min="0.05" max="0.9" step="0.01"></label>
+          <label>最大前后速度 m/s<input id="max_forward_speed_m_s" type="number" min="0.05" max="3" step="0.05"></label>
+          <label>距离 Kp<input id="distance_kp" type="number" min="0" max="10" step="0.05"></label>
+          <label>距离 Kd<input id="distance_kd" type="number" min="0" max="10" step="0.01"></label>
+          <label>Yaw Kp<input id="yaw_kp" type="number" min="0" max="180" step="1"></label>
+          <label>Yaw Kd<input id="yaw_kd" type="number" min="0" max="50" step="0.1"></label>
+          <label>最大 Yaw 角速度 °/s<input id="max_yaw_rate_deg_s" type="number" min="1" max="90" step="1"></label>
+          <button id="apply-tuning">应用到本地预览</button>
+        </div>
+        <div id="message"></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const number = (v, digits=1, suffix='') => v == null ? '--' : `${Number(v).toFixed(digits)}${suffix}`;
+    const SIM_KEY_BINDINGS = {
+      KeyW:['pitch',1], KeyS:['pitch',-1],
+      KeyA:['roll',-1], KeyD:['roll',1],
+      ShiftLeft:['throttle',1], AltLeft:['throttle',-1],
+      KeyQ:['yaw',-1], KeyE:['yaw',1],
+    };
+    const simChannels={pitch:1500,roll:1500,throttle:1500,yaw:1500};
+    const simPressed=new Set();
+    let simLastFrame=performance.now();
+    const isTypingTarget = target => target instanceof HTMLElement && Boolean(target.closest('input,select,textarea,button'));
+    function resetSimKeys() { simPressed.clear(); Object.keys(simChannels).forEach(k=>simChannels[k]=1500); renderSimChannels(); sendKeyboardAxes(); }
+    function targetForAxis(axis) {
+      let direction=0;
+      for(const code of simPressed) if(SIM_KEY_BINDINGS[code]?.[0]===axis) direction+=SIM_KEY_BINDINGS[code][1];
+      return direction>0?2000:(direction<0?1000:1500);
+    }
+    function renderSimChannels() {
+      for(const [axis,valueRaw] of Object.entries(simChannels)) {
+        const value=Math.round(valueRaw), ratio=Math.max(0,Math.min(1,(value-1000)/1000)), hue=120*(1-ratio);
+        $(`${axis}-channel`).textContent=value;
+        $(`${axis}-channel`).style.color=`hsl(${hue} 85% 65%)`;
+        $(`${axis}-marker`).style.left=`${ratio*100}%`;
+        $(`${axis}-marker`).style.background=`hsl(${hue} 75% 48%)`;
+      }
+      document.querySelectorAll('kbd[data-code]').forEach(key=>key.classList.toggle('active',simPressed.has(key.dataset.code)));
+      $('keyboard-state').textContent=simPressed.size?`按下：${[...simPressed].map(code=>document.querySelector(`kbd[data-code="${code}"]`)?.textContent||code).join(' + ')}`:'全部通道中立 1500';
+    }
+    function animateSimChannels(now) {
+      const step=Math.min(60,(now-simLastFrame)*0.8); simLastFrame=now;
+      for(const axis of Object.keys(simChannels)) {
+        const target=targetForAxis(axis);
+        if(target===1500) simChannels[axis]=1500;
+        else if(simChannels[axis]<target) simChannels[axis]=Math.min(target,simChannels[axis]+step);
+        else if(simChannels[axis]>target) simChannels[axis]=Math.max(target,simChannels[axis]-step);
+      }
+      renderSimChannels(); requestAnimationFrame(animateSimChannels);
+    }
+    window.addEventListener('keydown', event=>{
+      if(!SIM_KEY_BINDINGS[event.code] || isTypingTarget(event.target)) return;
+      event.preventDefault(); simPressed.add(event.code);
+    });
+    window.addEventListener('keyup', event=>{
+      if(!SIM_KEY_BINDINGS[event.code]) return;
+      event.preventDefault(); simPressed.delete(event.code);
+    });
+    window.addEventListener('blur', resetSimKeys);
+    document.addEventListener('visibilitychange', ()=>{ if(document.hidden) resetSimKeys(); });
+    renderSimChannels(); requestAnimationFrame(animateSimChannels);
+    let keyboardControlBusy=false, keyboardControlEnabled=false, keyboardAxesBusy=false;
+    function normalizedKeyboardAxes() {
+      return {
+        pitch:(simChannels.pitch-1500)/500,
+        roll:(simChannels.roll-1500)/500,
+        throttle:(simChannels.throttle-1500)/500,
+        yaw:(simChannels.yaw-1500)/500,
+      };
+    }
+    async function sendKeyboardAxes() {
+      if(!keyboardControlEnabled||keyboardAxesBusy) return;
+      keyboardAxesBusy=true;
+      try { await post('/api/keyboard-control/axes',normalizedKeyboardAxes()); }
+      catch(e) { keyboardControlEnabled=false; $('message').textContent=e.message; }
+      finally { keyboardAxesBusy=false; }
+    }
+    setInterval(sendKeyboardAxes,100);
+    $('keyboard-control-toggle').addEventListener('change',async event=>{
+      const requested=event.currentTarget.checked;
+      event.currentTarget.checked=!requested;
+      if(requested) {
+        if(!$('real-action-confirm').checked) { $('message').textContent='请先勾选现场安全确认。'; return; }
+        if(!window.confirm('开启后键盘将真实发送Offboard速度设定值。ARMED且仍在地面时仅Shift上升有效；飞控确认IN_AIR后才开放其余方向键。确认继续吗？')) return;
+      }
+      keyboardControlBusy=true;
+      try {
+        const r=await post(requested?'/api/keyboard-control/enable':'/api/keyboard-control/disable',requested?{confirmation:'ENABLE'}:undefined);
+        keyboardControlEnabled=Boolean(r.state?.enabled);
+        if(keyboardControlEnabled && document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        $('message').textContent=r.message;
+      } catch(e) { $('message').textContent=e.message; }
+      finally { keyboardControlBusy=false; }
+    });
+    async function sendHighLevelAction(action,label) {
+      if(!$('real-action-confirm').checked) { $('message').textContent='请先勾选现场安全确认。'; return; }
+      if(!window.confirm(`即将向真实无人机发送${label}命令，并停止键盘设定值。确认继续吗？`)) return;
+      try { const r=await post(`/api/flight/${action}`,{confirmation:action==='land'?'LAND':'RTL'}); $('message').textContent=r.message; }
+      catch(e) { $('message').textContent=e.message; }
+    }
+    $('real-land').onclick=()=>sendHighLevelAction('land','降落');
+    $('real-rtl').onclick=()=>sendHighLevelAction('rtl','返航');
+    let realActionBusy=false;
+    $('real-arm-toggle').addEventListener('change', async event=>{
+      const requested=event.currentTarget.checked;
+      event.currentTarget.checked=!requested;
+      if(!$('real-action-confirm').checked) { $('message').textContent='请先完成真实飞控动作的现场安全确认。'; return; }
+      const action=requested?'ARM':'DISARM';
+      const actionHint=requested
+        ? '电脑ARM要求零速度预备已就绪、飞手已手动切入OFFBOARD且实体急停已解除。ARM后电机可能立即怠速旋转。'
+        : 'DISARM只允许飞控明确报告已落地时发送。';
+      if(!window.confirm(`即将向真实无人机发送 ${action} 命令。${actionHint} 确认现场安全并继续吗？`)) return;
+      realActionBusy=true;
+      try {
+        const r=await post('/api/flight/arm',{armed:requested,confirmation:action});
+        $('message').textContent=r.message;
+      } catch(e) { $('message').textContent=e.message; }
+      finally { realActionBusy=false; }
+    });
+    $('emergency-latch-toggle').addEventListener('change', async event=>{
+      const requested=event.currentTarget.checked;
+      event.currentTarget.checked=!requested;
+      if(!requested) {
+        if(!$('real-action-confirm').checked) { $('message').textContent='解除紧急制动前，请先完成现场安全确认。'; return; }
+        if(!window.confirm('解除网页紧急制动锁存后，将重新允许网页ARM。解除本身不会自动ARM，确认继续吗？')) return;
+      }
+      realActionBusy=true;
+      try {
+        const r=await post('/api/flight/emergency-latch',{enabled:requested,confirmation:requested?'ENGAGE':'RELEASE'});
+        $('message').textContent=r.message;
+      } catch(e) { $('message').textContent=e.message; }
+      finally { realActionBusy=false; }
+    });
+    async function post(url, body) {
+      const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:body ? JSON.stringify(body) : undefined});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || data.message || `HTTP ${response.status}`);
+      return data;
+    }
+    $('video').addEventListener('click', async event => {
+      const rect = event.currentTarget.getBoundingClientRect();
+      try { const r = await post('/api/target/select', {x:(event.clientX-rect.left)/rect.width, y:(event.clientY-rect.top)/rect.height}); $('message').textContent=r.message; }
+      catch(e) { $('message').textContent=e.message; }
+    });
+    let videoReconnectTimer = null;
+    function reconnectVideo() {
+      clearTimeout(videoReconnectTimer);
+      $('video').src=`/video.mjpg?reconnect=${Date.now()}`;
+    }
+    $('video').addEventListener('error', () => {
+      clearTimeout(videoReconnectTimer);
+      videoReconnectTimer=setTimeout(reconnectVideo, 1000);
+    });
+    $('clear-target').onclick = () => post('/api/target/clear').catch(e => $('message').textContent=e.message);
+    $('apply-model').onclick = async () => {
+      const modelId=$('model-select').value;
+      $('apply-model').disabled=true;
+      try {
+        const r=await post('/api/models/select', {model_id:modelId});
+        $('message').textContent=r.message;
+      } catch(e) {
+        $('message').textContent=e.message;
+      } finally {
+        $('apply-model').disabled=false;
+      }
+    };
+    let offboardToggleBusy=false;
+    $('offboard-test-toggle').addEventListener('change', async event => {
+      const requested=event.currentTarget.checked;
+      event.currentTarget.checked=!requested;
+      if(requested) {
+        if(!$('real-action-confirm').checked) { $('message').textContent='请先完成真实飞控动作的现场安全确认。'; return; }
+        if(!window.confirm('将以5 Hz真实发送零速度Offboard预备流。本操作不会ARM或切换模式；请保持无人机在地面并由飞手掌握实体遥控器。确认继续吗？')) return;
+      }
+      offboardToggleBusy=true;
+      event.currentTarget.disabled=true;
+      try {
+        const r=await post(
+          requested?'/api/offboard-test/enable':'/api/offboard-test/disable',
+          requested?{confirmation:'PREPARE'}:undefined
+        );
+        $('message').textContent=r.message;
+      } catch(e) {
+        $('message').textContent=e.message;
+      } finally {
+        offboardToggleBusy=false;
+        event.currentTarget.disabled=false;
+      }
+    });
+    $('apply-tuning').onclick = async () => {
+      const keys=['target_bbox_height_ratio','max_forward_speed_m_s','distance_kp','distance_kd','yaw_kp','yaw_kd','max_yaw_rate_deg_s'];
+      const body=Object.fromEntries(keys.map(k=>[k,Number($(k).value)]));
+      try { await post('/api/tuning', body); $('message').textContent='本地 PID 预览参数已更新；没有向飞控发送。'; }
+      catch(e) { $('message').textContent=e.message; }
+    };
+    let tuningLoaded=false;
+    let modelsLoaded=false;
+    async function refresh() {
+      try {
+        const s=await (await fetch('/api/state')).json(), t=s.telemetry, v=s.vision, p=s.command_preview, target=v.target, o=s.ground_offboard_test, k=s.keyboard_control||{}, m=s.models, f=s.flight_actions||{};
+        $('mode').textContent=t.flight_mode || '--'; $('armed').textContent=t.armed==null?'--':(t.armed?'YES':'NO'); $('alt').textContent=number(t.altitude_m,1,' m');
+        const hasLaser=t.laser_height_m!=null && t.laser_age_seconds!=null, laserFresh=hasLaser&&t.laser_age_seconds<=5;
+        $('laser-height').textContent=hasLaser?`激光高度：${number(t.laser_height_m,2,' m')} · ${number(t.laser_age_seconds,1,' s')}前${laserFresh?'':'（已过期）'}`:'激光高度：无测距数据';
+        $('laser-height').className=`laser-readout ${laserFresh?'ok':(hasLaser?'bad':'warn')}`;
+        $('roll').textContent=number(t.roll_deg,1,'°'); $('pitch').textContent=number(t.pitch_deg,1,'°'); $('yaw').textContent=number(t.yaw_deg,1,'°');
+        $('vx').textContent=number(t.vx_m_s,2,' m/s'); $('vy').textContent=number(t.vy_m_s,2,' m/s'); $('vz').textContent=number(t.vz_m_s,2,' m/s');
+        $('throttle').textContent=number(t.throttle_pct,0,'%'); $('stick-rp').textContent=`${number(t.stick_roll_pct,0)} / ${number(t.stick_pitch_pct,0)}`; $('stick-yt').textContent=`${number(t.stick_yaw_pct,0)} / ${number(t.stick_throttle_pct,0)}`;
+        $('rc-switches').textContent=`${t.rc_channel_5_pwm ?? '--'} / ${t.rc_channel_6_pwm ?? '--'} / ${t.rc_channel_7_pwm ?? '--'} / ${t.rc_channel_8_pwm ?? '--'}`;
+        const slots=[t.com_fltmode1,t.com_fltmode2,t.com_fltmode3,t.com_fltmode4,t.com_fltmode5,t.com_fltmode6].map(v=>v??'--').join('/');
+        $('mode-mapping').textContent=`OFFB_SW=${t.rc_map_offb_sw ?? '--'} · MODE_SW=${t.rc_map_mode_sw ?? '--'} · FLTMODE1–6=${slots}`;
+        const statusAge=t.last_status_age_seconds==null?'':` · ${number(t.last_status_age_seconds,1,' s')}前`;
+        $('status-text').textContent=t.last_status_text ? `${t.last_status_text}${statusAge}` : '--';
+        const killEngaged=t.rc_channel_6_pwm!=null
+          ? Number(t.rc_channel_6_pwm)>=1800
+          : /kill switch engaged/i.test(t.last_status_text||'');
+        $('status-text').className=killEngaged?'bad':'';
+        $('source').textContent=`${t.source || '--'} · ${number(t.age_seconds,2,' s')} · ${t.packets || 0} 包`;
+        const r=s.mavlink_router||{};
+        $('relay').textContent=r.enabled ? `本地双向路由：${r.ready?'在线':'离线'} · 数传→QGC/网页 ${r.vehicle_datagrams_received||0} · 本地→数传 ${r.local_datagrams_forwarded||0}${r.error?' · '+r.error:''}` : (t.qgc_forward_enabled ? `内置分流：${t.received_datagrams||0} / ${t.forwarded_datagrams||0} / ${t.dropped_datagrams||0} → ${t.qgc_forward_endpoint}` : `监听 127.0.0.1:14550 · 已收 ${t.received_datagrams||0} · 丢弃 ${t.dropped_datagrams||0}`);
+        const blocked=(r.blocked_manual_control||0)+(r.blocked_rc_override||0)+(r.blocked_unapproved_setpoint||0)+(r.blocked_reflected_vehicle||0)+(r.blocked_reflected_setpoint||0)+(r.blocked_malformed_uplink||0);
+        $('authority').textContent=r.rc_priority_enforced ? `实体RC摇杆最高优先级 · QGC模式/解锁/起降/返航/制动可用 · 已拦截 ${blocked} 包（虚拟摇杆 ${r.blocked_manual_control||0} / RC覆盖 ${r.blocked_rc_override||0} / 未授权连续设定值 ${r.blocked_unapproved_setpoint||0} / 遥测回环 ${r.blocked_reflected_vehicle||0} / 设定值回环 ${r.blocked_reflected_setpoint||0}）${r.last_blocked_reason?' · '+r.last_blocked_reason:''}` : '权限保护未启用';
+        $('authority').className=r.rc_priority_enforced?'ok':'bad';
+        $('telemetry-badge').textContent=t.connected?'遥测在线':'遥测离线'; $('telemetry-badge').className=`badge ${t.connected?'ok':'bad'}`;
+        if(!modelsLoaded && m.profiles) {
+          $('model-select').replaceChildren(...m.profiles.map(profile => {
+            const option=document.createElement('option'); option.value=profile.id; option.textContent=profile.label; return option;
+          }));
+          $('model-select').value=m.active_id || m.requested_id || '';
+          modelsLoaded=true;
+        }
+        const pending=m.loading_id || m.requested_id;
+        $('model-badge').textContent=pending?'切换中':(m.ready?'已就绪':'未就绪'); $('model-badge').className=`badge ${m.ready&&!pending?'ok':(m.error?'bad':'warn')}`;
+        const activeProfile=(m.profiles||[]).find(profile=>profile.id===m.active_id);
+        const promptText=activeProfile?.prompts?.length?` · 提示词：${activeProfile.prompts.join(' / ')}`:'';
+        const redText=activeProfile?.red_color_filter?` · 红色阈值 ≥ ${number(activeProfile.min_red_ratio*100,0,'%')}`:'';
+        $('model-status').textContent=`当前：${m.active_label} · ${m.active_model_path||'--'}${promptText}${redText}${m.error?' · '+m.error:''}`;
+        $('offboard-test-badge').textContent=o.enabled?'发送中':'关闭'; $('offboard-test-badge').className=`badge ${o.enabled?'ok':'warn'}`;
+        if(!offboardToggleBusy) { $('offboard-test-toggle').checked=Boolean(o.enabled); $('offboard-test-toggle').disabled=!o.available; }
+        $('offboard-test-rate').textContent=number(o.frequency_hz,1,' Hz'); $('offboard-test-packets').textContent=o.packets_sent||0; $('offboard-test-age').textContent=number(o.last_send_age_seconds,2,' s');
+        $('offboard-test-ready').textContent=!o.enabled?'未启动':(o.ready_for_offboard_arm?`已就绪 · ${number(o.enabled_for_seconds,1,' s')}`:`预备中 · ${number(o.enabled_for_seconds,1,' s')}`);
+        $('offboard-test-ready').className=o.ready_for_offboard_arm?'ok':'warn';
+        $('offboard-test-state').textContent=`${o.uplink_endpoint} · ${o.enabled?'发送零速度中':(o.last_stop_reason||'已关闭')}${o.error?' · '+o.error:''}`;
+        $('offboard-test-state').className=o.enabled?'ok':(o.error?'bad':'warn');
+        keyboardControlEnabled=Boolean(k.enabled);
+        if(!keyboardControlBusy) { $('keyboard-control-toggle').checked=keyboardControlEnabled; $('keyboard-control-toggle').disabled=!k.available||!t.connected; }
+        $('keyboard-tx-state').textContent=keyboardControlEnabled?`真实TX ${k.mode||''}`:'真实TX关闭';
+        $('keyboard-tx-state').className=`sim-action-state ${keyboardControlEnabled?'bad':'warn'}`;
+        $('keyboard-command-state').textContent=keyboardControlEnabled?`已发 ${k.packets_sent||0} 包 · 前 ${number(k.forward_m_s,2)} m/s · 右 ${number(k.right_m_s,2)} m/s · 下 ${number(k.down_m_s,2)} m/s · Yaw ${number(k.yaw_rate_deg_s,1)}°/s${k.mode==='GROUND_TAKEOFF'?' · 地面保护：仅Shift上升有效':''}${k.watchdog_zero_active?' · 看门狗已归零':''}`:`${k.last_stop_reason||'默认关闭'}${k.error?' · '+k.error:''}`;
+        const manualArmModes=['MANUAL','STABILIZED','ALTCTL','POSCTL','POSITION'];
+        const safetyConfirmed=$('real-action-confirm').checked;
+        const estopLatched=Boolean(p.local_estop_latched);
+        const modeName=String(t.flight_mode||'').toUpperCase();
+        const canManualArm=t.connected&&t.armed===false&&!o.enabled&&!k.enabled&&!estopLatched&&manualArmModes.includes(modeName);
+        const canPreparedOffboardArm=t.connected&&t.armed===false&&o.enabled&&o.ready_for_offboard_arm&&!k.enabled&&!estopLatched&&modeName==='OFFBOARD'&&t.landed_state==='ON_GROUND'&&!killEngaged&&t.rc_channel_6_pwm!=null;
+        const canArm=s.build?.guarded_computer_arm_and_shift_takeoff?canPreparedOffboardArm:(canManualArm||canPreparedOffboardArm);
+        const canDisarm=t.connected&&t.armed===true&&t.landed_state==='ON_GROUND';
+        if(!realActionBusy) {
+          $('real-arm-toggle').checked=Boolean(t.armed);
+          $('real-arm-toggle').disabled=!f.available||!safetyConfirmed||(t.armed? !canDisarm:!canArm);
+          $('emergency-latch-toggle').checked=estopLatched;
+          $('emergency-latch-toggle').disabled=!f.available||!t.connected;
+          $('real-land').disabled=!safetyConfirmed||t.armed!==true||t.landed_state!=='IN_AIR';
+          $('real-rtl').disabled=!safetyConfirmed||t.armed!==true||t.landed_state!=='IN_AIR';
+        }
+        $('emergency-latch-state').textContent=estopLatched?'急停状态：已锁存，网页ARM被禁止。地面已发送正常DISARM；空中则发送PX4 Pause。':'急停状态：未锁存。打开即阻止网页ARM；若地面已ARM则立即发送正常DISARM。';
+        $('emergency-latch-state').className=`command-state ${estopLatched?'bad':'ok'}`;
+        $('flight-action-badge').textContent=estopLatched?'急停已锁存':(!safetyConfirmed?'等待确认':(t.armed?'已解锁':'允许测试'));
+        $('flight-action-badge').className=`badge ${estopLatched?'bad':(!safetyConfirmed?'warn':(t.armed?'warn':'ok'))}`;
+        $('flight-action-state').textContent=`模式 ${t.flight_mode||'--'} · ${t.armed?'ARMED':'DISARMED'} · ${t.landed_state||'UNKNOWN'} · 已发真实动作 ${f.commands_sent||0}${f.last_action?' · 最近 '+f.last_action:''}${f.error?' · '+f.error:''}`;
+        const ackNames={0:'ACCEPTED',1:'TEMPORARILY_REJECTED',2:'DENIED',3:'UNSUPPORTED',4:'FAILED',5:'IN_PROGRESS',6:'CANCELLED'};
+        const ackRelevant=[192,400].includes(t.last_command_ack_command) && t.last_command_ack_age_seconds!=null;
+        $('command-ack').textContent=ackRelevant?`飞控确认：CMD ${t.last_command_ack_command} · ${ackNames[t.last_command_ack_result]||t.last_command_ack_result} · ${number(t.last_command_ack_age_seconds,1,' s')}前`:'飞控确认：--';
+        $('vision-badge').textContent=v.connected?'视频在线':(v.age_seconds!=null?'视频重连中':'等待视频'); $('vision-badge').className=`badge ${v.connected?'ok':'warn'}`; $('video-meta').textContent=`${v.width||'--'}×${v.height||'--'} · ${number(v.processing_fps,1,' FPS')} · 重连 ${v.reconnect_count||0} 次${v.capture_error?' · '+v.capture_error:''}`;
+        $('target-badge').textContent=target.locked?target.source:'未锁定'; $('target-badge').className=`badge ${target.locked?'ok':''}`;
+        $('target-id').textContent=target.track_id ?? '--'; $('box-ratio').textContent=number(target.bbox_height_ratio,3); $('center-error').textContent=number(target.center_error_x,3);
+        $('preview-forward').textContent=number(p.raw_forward_m_s,2,' m/s'); $('preview-yaw').textContent=number(p.raw_yaw_rate_deg_s,1,' °/s'); $('gate').textContent=p.gate_reason;
+        $('gate').className=p.offboard_observed && p.telemetry_fresh && !p.local_estop_latched?'ok':'warn';
+        if (!tuningLoaded) { Object.entries(s.tuning).forEach(([k,val])=>{ if($(k)) $(k).value=val; }); tuningLoaded=true; }
+        const errors=[t.error,(!v.connected?v.capture_error:''),v.detector_error,v.tracker_error].filter(Boolean); if(errors.length) $('message').textContent=errors.join(' ｜ ');
+      } catch(e) { $('message').textContent=`状态读取失败：${e.message}`; }
+    }
+    refresh(); setInterval(refresh,250);
+  </script>
+</body>
+</html>

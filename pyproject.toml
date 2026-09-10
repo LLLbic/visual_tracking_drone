@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zj-uav-tracking-preview"
+version = "0.1.0"
+description = "UAV person-tracking preview, PX4 telemetry dashboard, and guarded ground test"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "numpy>=2.0,<3",
+  "opencv-contrib-python>=4.12,<5",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+vision = [
+    "clip @ git+https://github.com/ultralytics/CLIP.git",
+    "lap>=0.5.12,<1",
+    "torch==2.14.0",
+    "torchvision==0.29.0",
+    "ultralytics>=8.3,<9",
+]
+telemetry = ["pymavlink>=2.4.49,<3"]
+all = [
+  "clip @ git+https://github.com/ultralytics/CLIP.git",
+  "lap>=0.5.12,<1",
+  "pymavlink>=2.4.49,<3",
+  "torch==2.14.0",
+  "torchvision==0.29.0",
+  "ultralytics>=8.3,<9",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[project.scripts]
+uav-preview = "uav_preview.main:main"
+
+[dependency-groups]
+dev = ["pytest>=8.4,<10"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+uav_preview = ["web/*.html"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
