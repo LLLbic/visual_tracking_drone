@@ -59,12 +59,13 @@ class GroundOffboardTestState:
 
 
 class GroundOffboardSetpointSender:
-    """Manual 5 Hz Offboard proof-of-life and guarded ARM preparation.
+    """Manual 5 Hz, zero-only, disarmed ground link test.
 
     The class has no COMMAND_LONG, SET_MODE, arm/disarm, RC override or manual
     control path. Its sole outbound message is a zero-velocity local-NED
-    setpoint. After a stable pre-stream it may remain active through a guarded
-    ground ARM in OFFBOARD, but it never arms or changes mode by itself.
+    setpoint. It immediately stops as soon as the vehicle is no longer
+    explicitly DISARMED + ON_GROUND; it is never part of an ARM or takeoff
+    workflow.
     """
 
     def __init__(
@@ -154,20 +155,9 @@ class GroundOffboardSetpointSender:
             return "飞控遥测离线或已过期，拒绝发送"
         if telemetry.landed_state != "ON_GROUND":
             return f"仅允许飞控明确报告ON_GROUND；当前为{telemetry.landed_state}"
-        if telemetry.armed is False:
-            return ""
-        if telemetry.armed is True:
-            mode = (telemetry.flight_mode or "UNKNOWN").upper().replace(" ", "_")
-            with self._lock:
-                ready = self._state.ready_for_offboard_arm
-            if telemetry.rc_channel_6_pwm is None:
-                return "已解锁后未收到实体Kill Switch通道值"
-            if telemetry.rc_channel_6_pwm >= 1800:
-                return "实体Kill Switch已触发"
-            if ready and mode == "OFFBOARD":
-                return ""
-            return "检测到已解锁，但零速度预备尚未就绪或飞控不在OFFBOARD"
-        return "飞控解锁状态未知，拒绝发送"
+        if telemetry.armed is not False:
+            return "仅允许飞控明确报告DISARMED；检测到已解锁或状态未知"
+        return ""
 
     def _auto_stop(self, reason: str) -> None:
         with self._lock:

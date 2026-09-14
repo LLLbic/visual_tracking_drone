@@ -5,14 +5,32 @@
 # D7 机内摄像头原始码流。电脑需要在连接数传的以太网上具备
 # 192.168.111.0/24 的直连地址或明确路由，才能真正拉到该视频。
 source = "rtsp://192.168.111.11:554/user=admin&password=&channel=1&stream=1.sdp?real_stream"
-transport = "tcp"
+transport = "udp"
+# 绕过OpenCV VideoCapture的RTSP内部缓存，由独立FFmpeg进程拉流。
+capture_backend = "ffmpeg"
+ffmpeg_path = "ffmpeg"
+# RTX 4070 NVDEC；若现场验证发现CUVID不稳定，可临时改为software做A/B对比。
+ffmpeg_decoder = "h264_cuvid"
+# 原始BGR管道必须固定帧尺寸，与当前stream=1子码流一致。
+frame_width = 640
+frame_height = 360
 reconnect_seconds = 2.0
 jpeg_quality = 82
+# 低延迟显示只交付最新完成的真实帧；处理不过来时主动丢弃旧帧，禁止追赶历史画面。
+low_latency_latest_frame = true
+# 相机已实测H.264 / 15 FPS / 15帧关键帧间隔；UDP最多等待100 ms乱序包。
+udp_buffer_size_bytes = 1048576
+udp_reorder_queue_size = 32
+udp_max_delay_ms = 100
+udp_read_timeout_ms = 1000
+# 单次读取失败先在原会话内等待恢复；持续失败超过该时间才重建RTSP连接。
+udp_failure_grace_seconds = 2.5
 
 [frame_interpolation]
 # 实验分支：NVIDIA NVOFA/FRUC在相邻真实帧之间生成一个中间帧（5 FPS -> 10 FPS）。
 # 插值帧仅进入网页预览，不进入YOLO决策、PID或任何飞控发送链路。
-enabled = true
+# 当前以端到端低于1秒为优先目标，默认关闭；需要做FRUC A/B实验时再手动开启。
+enabled = false
 backend = "nvidia_fruc"
 sdk_root = "D:/NVToolKits/Optical_Flow_SDK_5.0.7/Optical_Flow_SDK_5.0.7"
 native_library = ".runtime/nvof-fruc/nvof_fruc_bridge.dll"
@@ -81,6 +99,10 @@ target_class_ids = []
 red_color_filter = false
 
 [telemetry]
+flow_message_type = "OPTICAL_FLOW_RAD"
+flow_sensor_id = 0
+# 本地授权工程门槛，未改PX4的EKF2_OF_QMIN；必须结合融合与测距证据。
+flow_minimum_quality = 100
 enabled = true
 bind_host = "127.0.0.1"
 # 本地双向路由器把MiniHomer遥测复制到这里，网页不直接占用外部8080。
@@ -91,6 +113,30 @@ forward_qgc = false
 # 以下目标在当前架构中停用；保留是为了使配置可随时切换回内置分流模式。
 qgc_host = "127.0.0.1"
 qgc_port = 14550
+
+[position_stream]
+# 仅在飞控明确处于DISARMED + ON_GROUND时发送临时消息周期请求；不写PX4参数，重启不保留。
+enabled = true
+local_position_hz = 5.0
+global_position_hz = 5.0
+extended_state_hz = 2.0
+estimator_hz = 5.0
+# mavlink status确认地面站链路仅1200 B/s；先核验带宽分配，不自动增加流量。
+request_flow_range = false
+flow_hz = 5.0
+range_hz = 5.0
+# 这里只调整遥测请求的达标统计；原生GPS起飞的定位检查不变。
+require_global_position = false
+minimum_effective_hz = 4.0
+minimum_extended_state_hz = 1.0
+retry_seconds = 3.0
+max_attempts = 3
+uplink_host = "127.0.0.1"
+uplink_port = 14560
+target_system = 1
+target_component = 1
+source_system = 245
+source_component = 191
 
 [mavlink_router]
 # 电脑端唯一的外部MAVLink会话。数传与飞控配置完全不变。
@@ -147,13 +193,67 @@ source_component = 191
 # 默认关闭。ARMED + ON_GROUND + OFFBOARD时只允许Shift上升；飞控报告
 # IN_AIR后才开放全部方向。实体遥控器切出OFFBOARD可立即接管。
 available = true
-allow_ground_takeoff = true
+allow_ground_takeoff = false
+require_physical_offboard_switch = true
+physical_offboard_switch_pwm_min = 1800
 frequency_hz = 10.0
 input_timeout_seconds = 0.4
 auto_stop_seconds = 1.5
 max_horizontal_speed_m_s = 0.25
 max_vertical_speed_m_s = 0.20
 max_yaw_rate_deg_s = 10.0
+
+[takeoff]
+# 页面启动后才会运行的一次性状态机。它不写PX4参数、不发送RC覆盖，
+# 只在地面检查通过后发送一次ARM和一次PX4原生Takeoff命令。
+available = true
+min_height_m = 1.0
+max_height_m = 3.0
+default_height_m = 1.5
+preflight_stable_seconds = 2.0
+arm_ack_timeout_seconds = 3.0
+arm_to_takeoff_delay_seconds = 1.0
+takeoff_ack_timeout_seconds = 3.0
+liftoff_timeout_seconds = 6.0
+climb_timeout_seconds = 20.0
+hover_stable_seconds = 2.0
+height_tolerance_m = 0.15
+vertical_speed_tolerance_m_s = 0.20
+liftoff_height_m = 0.15
+preflight_max_tilt_deg = 10.0
+max_tilt_deg = 20.0
+max_horizontal_drift_m = 1.0
+position_stale_seconds = 1.0
+
+[local_offboard_takeoff]
+# 独立的无GPS本地起飞模式。用户点击启动后，程序先以10 Hz保持启动瞬间
+# 的本地x/y/z/yaw；页面提示就绪后，必须由飞手用实体CH8手动切入Offboard。
+# 程序随后只发送一次正常ARM，并把本地NED z目标以0.30 m/s斜坡提高到
+# “当前高度 + 目标高度”。到达后继续发送定点保持，直至飞手切回Position
+# 或点击受控退出。它不修改PX4参数、不自动切模式、不发送RC覆盖。
+available = true
+# 当前仅验证起飞/悬停；前后端均禁止键盘交接，不影响必要的定位保护。
+keyboard_handoff_enabled = false
+# 旧版纯位置起飞/悬停基线。依赖PX4有效定位输出；未下传的详细EKF数据仅诊断。
+navigation_profile = "px4_fixed_hover"
+min_height_m = 1.0
+max_height_m = 3.0
+default_height_m = 1.5
+frequency_hz = 10.0
+prestream_seconds = 1.5
+offboard_wait_timeout_seconds = 60.0
+arm_ack_timeout_seconds = 3.0
+liftoff_timeout_seconds = 8.0
+climb_timeout_seconds = 20.0
+climb_rate_m_s = 0.30
+hover_stable_seconds = 2.0
+height_tolerance_m = 0.15
+vertical_speed_tolerance_m_s = 0.20
+liftoff_height_m = 0.15
+preflight_max_tilt_deg = 10.0
+max_tilt_deg = 20.0
+max_horizontal_drift_m = 1.0
+position_stale_seconds = 1.0
 
 [server]
 host = "127.0.0.1"

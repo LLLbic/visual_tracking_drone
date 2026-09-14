@@ -4,8 +4,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from .config import AppConfig
 from .runtime import Runtime
@@ -55,6 +55,32 @@ class ExplicitConfirmation(BaseModel):
     confirmation: str = Field(min_length=3, max_length=12)
 
 
+class HandoffIdentity(BaseModel):
+    run_id: str = Field(min_length=16, max_length=80)
+    client_id: str = Field(min_length=16, max_length=80)
+
+
+class HandoffInput(HandoffIdentity, KeyboardAxes):
+    sequence: StrictInt = Field(ge=0)
+    foreground: StrictBool
+    confirmed: StrictBool
+    keys_released: StrictBool
+    token: str | None = Field(default=None, min_length=16, max_length=128)
+
+
+class HandoffAuthorization(HandoffIdentity):
+    confirmation: str
+
+
+class HandoffRevocation(HandoffIdentity):
+    token: str = Field(min_length=16, max_length=128)
+
+
+class TakeoffRequest(BaseModel):
+    target_height_m: float = Field(ge=1.0, le=3.0)
+    confirmation: str = Field(min_length=7, max_length=12)
+
+
 def create_app(config: AppConfig) -> FastAPI:
     runtime = Runtime(config)
 
@@ -75,7 +101,29 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/video.mjpg")
     async def video_stream() -> StreamingResponse:
-        return StreamingResponse(runtime.video.mjpeg(), media_type="multipart/x-mixed-replace; boundary=frame")
+        return StreamingResponse(
+            runtime.video.mjpeg(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/video/latest.jpg")
+    def latest_video_frame(after: int = -1) -> Response:
+        serial, jpeg = runtime.video.wait_for_jpeg(after_serial=after, timeout=1.0)
+        headers = {
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Frame-Serial": str(serial),
+        }
+        if jpeg is None:
+            return Response(status_code=204, headers=headers)
+        return Response(content=jpeg, media_type="image/jpeg", headers=headers)
 
     @app.get("/api/state")
     async def state() -> dict[str, object]:
@@ -105,14 +153,18 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.post("/api/safety/local-estop")
     async def local_estop() -> dict[str, object]:
-        runtime.disable_ground_offboard_test("本地急停触发")
-        runtime.gate.latch_estop()
-        return {"ok": True, "message": "本地控制已锁存为停止；地面 Offboard 预备流已关闭"}
+        state = runtime.latch_local_control_only("兼容接口触发本地安全锁存")
+        return {"ok": True, **state}
 
     @app.post("/api/safety/reset-local-estop")
-    async def reset_local_estop() -> dict[str, object]:
-        runtime.gate.reset_estop()
-        return {"ok": True, "message": "仅解除本地预览锁存；飞控状态未改变"}
+    async def reset_local_estop(request: EmergencyLatchRequest) -> dict[str, object]:
+        if request.enabled or request.confirmation != "RELEASE":
+            raise HTTPException(status_code=409, detail="必须明确确认RELEASE")
+        try:
+            state = runtime.set_emergency_latch(False)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, **state}
 
     @app.post("/api/offboard-test/enable")
     async def enable_ground_offboard_test(request: ExplicitConfirmation) -> dict[str, object]:
@@ -137,6 +189,11 @@ def create_app(config: AppConfig) -> FastAPI:
             "state": state,
         }
 
+    @app.post("/api/keyboard-control/presence")
+    async def keyboard_presence() -> dict[str, object]:
+        runtime.keyboard_control.browser_presence()
+        return {"ok": True}
+
     @app.post("/api/keyboard-control/enable")
     async def enable_keyboard_control(request: ExplicitConfirmation) -> dict[str, object]:
         if request.confirmation != "ENABLE":
@@ -147,7 +204,7 @@ def create_app(config: AppConfig) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "ok": True,
-            "message": "键盘真实设定值发送已开启；松键归零，输入中断将自动停止",
+            "message": "空中键盘Offboard速度发送已开启；松键归零，输入中断或实体CH8离开Offboard将自动停止",
             "state": state,
         }
 
@@ -184,15 +241,107 @@ def create_app(config: AppConfig) -> FastAPI:
             "state": command_state,
         }
 
+    @app.post("/api/takeoff/start")
+    async def start_takeoff(request: TakeoffRequest) -> dict[str, object]:
+        if request.confirmation != "TAKEOFF":
+            raise HTTPException(status_code=409, detail="必须明确确认TAKEOFF")
+        try:
+            state = runtime.begin_takeoff(request.target_height_m)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "message": (
+                f"指定高度起飞状态机已启动：{request.target_height_m:.1f}米。"
+                "先进行稳定地面检查，再依次发送ARM和PX4原生Takeoff。"
+            ),
+            "state": state,
+        }
+
+    @app.post("/api/takeoff/abort")
+    async def abort_takeoff(request: ExplicitConfirmation) -> dict[str, object]:
+        if request.confirmation != "ABORT":
+            raise HTTPException(status_code=409, detail="必须明确确认ABORT")
+        try:
+            state = runtime.abort_takeoff()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "message": "指定高度起飞流程已取消；地面请求正常DISARM，空中请求LAND",
+            "state": state,
+        }
+
+    @app.post("/api/local-takeoff/start")
+    async def start_local_takeoff(request: TakeoffRequest) -> dict[str, object]:
+        if request.confirmation != "TAKEOFF":
+            raise HTTPException(status_code=409, detail="必须明确确认TAKEOFF")
+        try:
+            state = runtime.begin_local_takeoff(request.target_height_m)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "message": (
+                f"本地Offboard起飞预发送已启动：相对当前高度{request.target_height_m:.1f}米。"
+                "请等待页面提示后，再用实体遥控器CH8手动切入Offboard；程序不会自动切模式。"
+            ),
+            "state": state,
+        }
+
+    @app.post("/api/local-takeoff/abort")
+    async def abort_local_takeoff(request: ExplicitConfirmation) -> dict[str, object]:
+        if request.confirmation != "ABORT":
+            raise HTTPException(status_code=409, detail="必须明确确认ABORT")
+        try:
+            state = runtime.abort_local_takeoff()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "message": "本地Offboard起飞已受控退出：地面正常DISARM，空中请求LAND",
+            "state": state,
+        }
+
+    @app.post("/api/local-takeoff/keyboard/input")
+    async def handoff_input(request: HandoffInput) -> dict[str, object]:
+        try:
+            state = runtime.report_handoff_input(run_id=request.run_id, client_id=request.client_id,
+                sequence=request.sequence, axes=(request.pitch,request.roll,request.throttle,request.yaw),
+                foreground=request.foreground,confirmed=request.confirmed,keys_released=request.keys_released,token=request.token)
+            return {"ok":True,"state":state}
+        except ValueError as exc:
+            raise HTTPException(status_code=409,detail=str(exc)) from exc
+
+    @app.post("/api/local-takeoff/keyboard/authorize")
+    async def authorize_handoff(request: HandoffAuthorization) -> dict[str, object]:
+        if request.confirmation != "HANDOFF":
+            raise HTTPException(status_code=409,detail="必须明确确认HANDOFF")
+        try:
+            result = runtime.authorize_handoff(request.run_id,request.client_id)
+            return {"ok":True,"message":"键盘待命：原位置目标不变，同一个发送器继续运行",**result}
+        except ValueError as exc:
+            raise HTTPException(status_code=409,detail=str(exc)) from exc
+
+    @app.post("/api/local-takeoff/keyboard/revoke")
+    async def revoke_handoff(request: HandoffRevocation) -> dict[str, object]:
+        try:
+            state=runtime.revoke_handoff(request.run_id,request.client_id,request.token)
+            return {"ok":True,"state":state,"message":"已撤销键盘权限；原轨迹减速并保持，不发送LAND"}
+        except ValueError as exc:
+            raise HTTPException(status_code=409,detail=str(exc)) from exc
+
     @app.post("/api/flight/brake")
-    async def brake() -> dict[str, object]:
+    async def brake(request: ExplicitConfirmation) -> dict[str, object]:
+        if request.confirmation != "BRAKE":
+            raise HTTPException(status_code=409, detail="必须明确确认BRAKE")
         try:
             command_state = runtime.brake()
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "ok": True,
-            "message": "真实PX4紧急制动/暂停命令已发送，等待飞控COMMAND_ACK确认",
+            "message": "真实PX4 Pause命令已发送，等待飞控COMMAND_ACK确认；此接口不是停桨急停",
             "state": command_state,
         }
 
@@ -201,7 +350,10 @@ def create_app(config: AppConfig) -> FastAPI:
         expected = "ENGAGE" if request.enabled else "RELEASE"
         if request.confirmation != expected:
             raise HTTPException(status_code=409, detail=f"必须明确确认{expected}")
-        state = runtime.set_emergency_latch(request.enabled)
+        try:
+            state = runtime.set_emergency_latch(request.enabled)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, **state}
 
     @app.post("/api/flight/land")
@@ -240,7 +392,7 @@ def create_app(config: AppConfig) -> FastAPI:
             content={
                 "ok": False,
                 "action": action,
-                "message": "该通用动作接口保持禁用：降落、返航和速度控制未接入。真实ARM/DISARM与PX4 Pause只通过专用受保护接口执行。",
+                "message": "该通用动作接口保持禁用。ARM/DISARM、PX4 Pause、Land、RTL和空中键盘速度只通过各自的受保护接口执行。",
             },
         )
 

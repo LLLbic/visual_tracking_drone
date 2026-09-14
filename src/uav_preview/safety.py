@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Lock
+from typing import Callable, TypeVar
+
+
+_T = TypeVar("_T")
 
 
 # This constant applies only to continuous vision-follow setpoints. Explicit,
@@ -25,9 +29,9 @@ class SafetyGate:
     It never changes a PX4 parameter, flight mode, arming state, or RC channel.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, initially_latched: bool = False) -> None:
         self._lock = Lock()
-        self._estop_latched = False
+        self._estop_latched = bool(initially_latched)
 
     @property
     def estop_latched(self) -> bool:
@@ -41,6 +45,20 @@ class SafetyGate:
     def reset_estop(self) -> None:
         with self._lock:
             self._estop_latched = False
+
+    def run_if_unlatched(self, action: Callable[[], _T]) -> _T:
+        """Run one unsafe transmit atomically with the latch check.
+
+        Holding the same lock used by ``latch_estop`` closes the race where an
+        ARM/TAKEOFF/RTL request passed an earlier check just before the operator
+        engaged the latch.  Once ``latch_estop`` returns, no guarded transmit
+        can still be in flight or begin afterwards.
+        """
+
+        with self._lock:
+            if self._estop_latched:
+                raise ValueError("网页安全处置仍处于锁存状态，拒绝发送该飞控动作")
+            return action()
 
     def evaluate(self, flight_mode: str, telemetry_fresh: bool, target_valid: bool) -> GateDecision:
         mode = (flight_mode or "UNKNOWN").upper().replace(" ", "_")

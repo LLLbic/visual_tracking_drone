@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from ipaddress import ip_address
+from math import isfinite
 from pathlib import Path
 from typing import Any, TypeVar
 import tomllib
@@ -11,8 +12,19 @@ import tomllib
 class VideoConfig:
     source: str = "0"
     transport: str = "tcp"
+    capture_backend: str = "opencv"
+    ffmpeg_path: str = "ffmpeg"
+    ffmpeg_decoder: str = "software"
+    frame_width: int = 640
+    frame_height: int = 360
     reconnect_seconds: float = 2.0
     jpeg_quality: int = 82
+    low_latency_latest_frame: bool = True
+    udp_buffer_size_bytes: int = 1_048_576
+    udp_reorder_queue_size: int = 32
+    udp_max_delay_ms: int = 100
+    udp_read_timeout_ms: int = 1_000
+    udp_failure_grace_seconds: float = 2.5
 
 
 @dataclass(slots=True)
@@ -86,10 +98,38 @@ class TelemetryConfig:
     forward_qgc: bool = False
     qgc_host: str = "127.0.0.1"
     qgc_port: int = 14550
+    flow_message_type: str = "OPTICAL_FLOW_RAD"
+    flow_sensor_id: int = 0
+    flow_minimum_quality: int = 100  # Local engineering gate; NOT a PX4 parameter.
 
     def __post_init__(self) -> None:
         if self.allowed_source_ips is None:
             self.allowed_source_ips = []
+
+
+@dataclass(slots=True)
+class PositionStreamConfig:
+    """Non-persistent MAVLink telemetry-rate requests made only on the ground."""
+
+    enabled: bool = True
+    local_position_hz: float = 5.0
+    global_position_hz: float = 5.0
+    extended_state_hz: float = 2.0
+    estimator_hz: float = 5.0
+    request_flow_range: bool = False
+    flow_hz: float = 5.0
+    range_hz: float = 5.0
+    require_global_position: bool = True
+    minimum_effective_hz: float = 2.5
+    minimum_extended_state_hz: float = 1.0
+    retry_seconds: float = 3.0
+    max_attempts: int = 3
+    uplink_host: str = "127.0.0.1"
+    uplink_port: int = 14560
+    target_system: int = 1
+    target_component: int = 1
+    source_system: int = 245
+    source_component: int = 191
 
 
 @dataclass(slots=True)
@@ -165,13 +205,70 @@ class KeyboardControlConfig:
     """Guarded body-frame velocity sender driven by the browser keyboard."""
 
     available: bool = False
+    # Ground takeoff from the browser is deliberately forbidden.  Take off
+    # with the physical RC in a manual assisted mode, then let the pilot move
+    # the physical mode switch to Offboard before enabling this sender.
     allow_ground_takeoff: bool = False
+    require_physical_offboard_switch: bool = True
+    physical_offboard_switch_pwm_min: int = 1800
     frequency_hz: float = 10.0
     input_timeout_seconds: float = 0.4
     auto_stop_seconds: float = 1.5
     max_horizontal_speed_m_s: float = 0.25
     max_vertical_speed_m_s: float = 0.20
     max_yaw_rate_deg_s: float = 10.0
+
+
+@dataclass(slots=True)
+class TakeoffConfig:
+    """One-shot, telemetry-guarded PX4 native takeoff state machine."""
+
+    available: bool = False
+    min_height_m: float = 1.0
+    max_height_m: float = 3.0
+    default_height_m: float = 1.5
+    preflight_stable_seconds: float = 2.0
+    arm_ack_timeout_seconds: float = 3.0
+    arm_to_takeoff_delay_seconds: float = 1.0
+    takeoff_ack_timeout_seconds: float = 3.0
+    liftoff_timeout_seconds: float = 6.0
+    climb_timeout_seconds: float = 20.0
+    hover_stable_seconds: float = 2.0
+    height_tolerance_m: float = 0.15
+    vertical_speed_tolerance_m_s: float = 0.20
+    liftoff_height_m: float = 0.15
+    preflight_max_tilt_deg: float = 10.0
+    max_tilt_deg: float = 20.0
+    max_horizontal_drift_m: float = 1.0
+    position_stale_seconds: float = 1.0
+
+
+@dataclass(slots=True)
+class LocalOffboardTakeoffConfig:
+    """Local-NED Offboard takeoff that starts from the captured ground pose."""
+
+    available: bool = False
+    # Takeoff/hover validation comes first; handoff requires explicit offline opt-in.
+    keyboard_handoff_enabled: bool = False
+    navigation_profile: str = "detailed"
+    min_height_m: float = 1.0
+    max_height_m: float = 3.0
+    default_height_m: float = 1.5
+    frequency_hz: float = 10.0
+    prestream_seconds: float = 1.5
+    offboard_wait_timeout_seconds: float = 60.0
+    arm_ack_timeout_seconds: float = 3.0
+    liftoff_timeout_seconds: float = 8.0
+    climb_timeout_seconds: float = 20.0
+    climb_rate_m_s: float = 0.30
+    hover_stable_seconds: float = 2.0
+    height_tolerance_m: float = 0.15
+    vertical_speed_tolerance_m_s: float = 0.20
+    liftoff_height_m: float = 0.15
+    preflight_max_tilt_deg: float = 10.0
+    max_tilt_deg: float = 20.0
+    max_horizontal_drift_m: float = 1.0
+    position_stale_seconds: float = 1.0
 
 
 @dataclass(slots=True)
@@ -188,9 +285,12 @@ class AppConfig:
     vision_models: dict[str, VisionModelProfile]
     mavlink_router: MavlinkRouterConfig
     telemetry: TelemetryConfig
+    position_stream: PositionStreamConfig
     control: ControlConfig
     ground_offboard_test: GroundOffboardTestConfig
     keyboard_control: KeyboardControlConfig
+    takeoff: TakeoffConfig
+    local_offboard_takeoff: LocalOffboardTakeoffConfig
     server: ServerConfig
 
 
@@ -214,6 +314,26 @@ def load_config(path: str | Path) -> AppConfig:
     video.transport = video.transport.casefold()
     if video.transport not in {"tcp", "udp"}:
         raise ValueError("video.transport must be either tcp or udp")
+    video.capture_backend = video.capture_backend.casefold()
+    if video.capture_backend not in {"opencv", "ffmpeg"}:
+        raise ValueError("video.capture_backend must be either opencv or ffmpeg")
+    video.ffmpeg_decoder = video.ffmpeg_decoder.casefold()
+    if video.ffmpeg_decoder not in {"software", "hevc_cuvid", "h264_cuvid"}:
+        raise ValueError(
+            "video.ffmpeg_decoder must be software, hevc_cuvid, or h264_cuvid"
+        )
+    if not 16 <= video.frame_width <= 7_680 or not 16 <= video.frame_height <= 4_320:
+        raise ValueError("video.frame_width/frame_height are outside the supported range")
+    if not 65_536 <= video.udp_buffer_size_bytes <= 16_777_216:
+        raise ValueError("video.udp_buffer_size_bytes must be between 65536 and 16777216")
+    if not 0 <= video.udp_reorder_queue_size <= 512:
+        raise ValueError("video.udp_reorder_queue_size must be between 0 and 512")
+    if not 0 <= video.udp_max_delay_ms <= 1_000:
+        raise ValueError("video.udp_max_delay_ms must be between 0 and 1000")
+    if not 250 <= video.udp_read_timeout_ms <= 30_000:
+        raise ValueError("video.udp_read_timeout_ms must be between 250 and 30000")
+    if not 0.0 <= video.udp_failure_grace_seconds <= 30.0:
+        raise ValueError("video.udp_failure_grace_seconds must be between 0 and 30")
 
     interpolation = _load_section(
         FrameInterpolationConfig, raw.get("frame_interpolation", {})
@@ -340,6 +460,76 @@ def load_config(path: str | Path) -> AppConfig:
         if telemetry.bind_port != router.telemetry_port:
             raise ValueError("telemetry.bind_port must match mavlink_router.telemetry_port")
 
+    position_stream = _load_section(
+        PositionStreamConfig, raw.get("position_stream", {})
+    )
+    if telemetry.flow_message_type not in {"OPTICAL_FLOW", "OPTICAL_FLOW_RAD"}:
+        raise ValueError("telemetry.flow_message_type must be a known raw flow message")
+    if type(telemetry.flow_sensor_id) is not int or not 0 <= telemetry.flow_sensor_id <= 255:
+        raise ValueError("telemetry.flow_sensor_id must be a uint8")
+    if type(telemetry.flow_minimum_quality) is not int or not 1 <= telemetry.flow_minimum_quality <= 255:
+        raise ValueError("telemetry.flow_minimum_quality must be within 1..255")
+    if not 1 <= position_stream.uplink_port <= 65535:
+        raise ValueError("position_stream.uplink_port must be between 1 and 65535")
+    try:
+        stream_uplink = ip_address(position_stream.uplink_host)
+    except ValueError as exc:
+        raise ValueError("position_stream.uplink_host must be a numeric loopback IP") from exc
+    if not stream_uplink.is_loopback:
+        raise ValueError("position_stream.uplink_host must be loopback-only")
+    for field_name in (
+        "target_system",
+        "target_component",
+        "source_system",
+        "source_component",
+    ):
+        value = getattr(position_stream, field_name)
+        if not 1 <= value <= 255:
+            raise ValueError(f"position_stream.{field_name} must be between 1 and 255")
+    for field_name in (
+        "local_position_hz",
+        "global_position_hz",
+        "extended_state_hz",
+        "estimator_hz",
+        "flow_hz",
+        "range_hz",
+        "minimum_effective_hz",
+        "minimum_extended_state_hz",
+        "retry_seconds",
+    ):
+        if not isfinite(getattr(position_stream, field_name)) or getattr(position_stream, field_name) <= 0:
+            raise ValueError(f"position_stream.{field_name} must be positive")
+    if (
+        position_stream.local_position_hz > 20
+        or position_stream.global_position_hz > 20
+        or position_stream.extended_state_hz > 20
+        or position_stream.estimator_hz > 20
+        or position_stream.flow_hz > 20
+        or position_stream.range_hz > 20
+    ):
+        raise ValueError("position_stream requested rates must not exceed 20 Hz")
+    if position_stream.minimum_effective_hz > min(
+        position_stream.local_position_hz, position_stream.global_position_hz, position_stream.estimator_hz
+    ):
+        raise ValueError("position_stream.minimum_effective_hz exceeds a requested rate")
+    if position_stream.minimum_extended_state_hz > position_stream.extended_state_hz:
+        raise ValueError(
+            "position_stream.minimum_extended_state_hz exceeds the requested rate"
+        )
+    if not 1 <= position_stream.max_attempts <= 5:
+        raise ValueError("position_stream.max_attempts must be between 1 and 5")
+    if type(position_stream.require_global_position) is not bool:
+        raise ValueError("position_stream.require_global_position must be boolean")
+    if type(position_stream.request_flow_range) is not bool:
+        raise ValueError("position_stream.request_flow_range must be boolean")
+    if position_stream.request_flow_range and position_stream.minimum_effective_hz > min(position_stream.flow_hz,position_stream.range_hz):
+        raise ValueError("flow/range requested rates must meet minimum_effective_hz")
+    if router.enabled:
+        if position_stream.uplink_host != router.local_host:
+            raise ValueError("position_stream must use the router loopback host")
+        if position_stream.uplink_port != router.local_ingress_port:
+            raise ValueError("position_stream must use the router local ingress port")
+
     ground_test = _load_section(
         GroundOffboardTestConfig, raw.get("ground_offboard_test", {})
     )
@@ -375,6 +565,15 @@ def load_config(path: str | Path) -> AppConfig:
         )
 
     keyboard = _load_section(KeyboardControlConfig, raw.get("keyboard_control", {}))
+    if keyboard.allow_ground_takeoff:
+        raise ValueError(
+            "keyboard_control.allow_ground_takeoff must remain false; "
+            "computer takeoff from the ground is disabled for safety"
+        )
+    if not 1600 <= keyboard.physical_offboard_switch_pwm_min <= 2100:
+        raise ValueError(
+            "keyboard_control.physical_offboard_switch_pwm_min must be between 1600 and 2100"
+        )
     if not 2.0 <= keyboard.frequency_hz <= 50.0:
         raise ValueError("keyboard_control.frequency_hz must be between 2 and 50 Hz")
     if not 0.1 <= keyboard.input_timeout_seconds < keyboard.auto_stop_seconds:
@@ -391,6 +590,116 @@ def load_config(path: str | Path) -> AppConfig:
         if getattr(keyboard, field_name) <= 0:
             raise ValueError(f"keyboard_control.{field_name} must be positive")
 
+    takeoff = _load_section(TakeoffConfig, raw.get("takeoff", {}))
+    # The requested operating envelope is a hard safety boundary, not a
+    # user-tunable suggestion.  A config edit must not silently widen it.
+    if abs(takeoff.min_height_m - 1.0) > 1e-9:
+        raise ValueError("takeoff.min_height_m must remain exactly 1.0 m")
+    if abs(takeoff.max_height_m - 3.0) > 1e-9:
+        raise ValueError("takeoff.max_height_m must remain exactly 3.0 m")
+    if not takeoff.min_height_m <= takeoff.default_height_m <= takeoff.max_height_m:
+        raise ValueError("takeoff.default_height_m must be between 1.0 and 3.0 m")
+    for field_name in (
+        "preflight_stable_seconds",
+        "arm_ack_timeout_seconds",
+        "arm_to_takeoff_delay_seconds",
+        "takeoff_ack_timeout_seconds",
+        "liftoff_timeout_seconds",
+        "climb_timeout_seconds",
+        "hover_stable_seconds",
+        "height_tolerance_m",
+        "vertical_speed_tolerance_m_s",
+        "liftoff_height_m",
+        "preflight_max_tilt_deg",
+        "max_tilt_deg",
+        "max_horizontal_drift_m",
+        "position_stale_seconds",
+    ):
+        if getattr(takeoff, field_name) <= 0:
+            raise ValueError(f"takeoff.{field_name} must be positive")
+    if takeoff.preflight_max_tilt_deg > takeoff.max_tilt_deg:
+        raise ValueError("takeoff.preflight_max_tilt_deg must not exceed max_tilt_deg")
+    if takeoff.max_tilt_deg > 35.0:
+        raise ValueError("takeoff.max_tilt_deg must not exceed 35 degrees")
+    if takeoff.height_tolerance_m >= takeoff.min_height_m:
+        raise ValueError("takeoff.height_tolerance_m must be below the minimum height")
+    if takeoff.liftoff_height_m >= takeoff.min_height_m:
+        raise ValueError("takeoff.liftoff_height_m must be below the minimum height")
+    if takeoff.position_stale_seconds > telemetry.stale_after_seconds:
+        raise ValueError(
+            "takeoff.position_stale_seconds must not exceed telemetry.stale_after_seconds"
+        )
+
+    local_takeoff = _load_section(
+        LocalOffboardTakeoffConfig, raw.get("local_offboard_takeoff", {})
+    )
+    if type(local_takeoff.keyboard_handoff_enabled) is not bool:
+        raise ValueError("local_offboard_takeoff.keyboard_handoff_enabled must be a boolean")
+    if local_takeoff.navigation_profile not in {"detailed", "px4_fixed_hover"}:
+        raise ValueError("local_offboard_takeoff.navigation_profile must be detailed or px4_fixed_hover")
+    if local_takeoff.navigation_profile == "px4_fixed_hover" and local_takeoff.keyboard_handoff_enabled:
+        raise ValueError("px4_fixed_hover forbids keyboard handoff")
+    if abs(local_takeoff.min_height_m - 1.0) > 1e-9:
+        raise ValueError("local_offboard_takeoff.min_height_m must remain exactly 1.0 m")
+    if abs(local_takeoff.max_height_m - 3.0) > 1e-9:
+        raise ValueError("local_offboard_takeoff.max_height_m must remain exactly 3.0 m")
+    if not (
+        local_takeoff.min_height_m
+        <= local_takeoff.default_height_m
+        <= local_takeoff.max_height_m
+    ):
+        raise ValueError(
+            "local_offboard_takeoff.default_height_m must be between 1.0 and 3.0 m"
+        )
+    for field_name in (
+        "frequency_hz",
+        "prestream_seconds",
+        "offboard_wait_timeout_seconds",
+        "arm_ack_timeout_seconds",
+        "liftoff_timeout_seconds",
+        "climb_timeout_seconds",
+        "climb_rate_m_s",
+        "hover_stable_seconds",
+        "height_tolerance_m",
+        "vertical_speed_tolerance_m_s",
+        "liftoff_height_m",
+        "preflight_max_tilt_deg",
+        "max_tilt_deg",
+        "max_horizontal_drift_m",
+        "position_stale_seconds",
+    ):
+        if getattr(local_takeoff, field_name) <= 0:
+            raise ValueError(f"local_offboard_takeoff.{field_name} must be positive")
+    if not 5.0 <= local_takeoff.frequency_hz <= 20.0:
+        raise ValueError("local_offboard_takeoff.frequency_hz must be between 5 and 20 Hz")
+    if local_takeoff.prestream_seconds < 1.0:
+        raise ValueError("local_offboard_takeoff.prestream_seconds must be at least 1 second")
+    if local_takeoff.preflight_max_tilt_deg > local_takeoff.max_tilt_deg:
+        raise ValueError(
+            "local_offboard_takeoff.preflight_max_tilt_deg must not exceed max_tilt_deg"
+        )
+    if local_takeoff.max_tilt_deg > 35.0:
+        raise ValueError("local_offboard_takeoff.max_tilt_deg must not exceed 35 degrees")
+    if local_takeoff.height_tolerance_m >= local_takeoff.min_height_m:
+        raise ValueError(
+            "local_offboard_takeoff.height_tolerance_m must be below the minimum height"
+        )
+    if local_takeoff.liftoff_height_m >= local_takeoff.min_height_m:
+        raise ValueError(
+            "local_offboard_takeoff.liftoff_height_m must be below the minimum height"
+        )
+    if local_takeoff.position_stale_seconds > telemetry.stale_after_seconds:
+        raise ValueError(
+            "local_offboard_takeoff.position_stale_seconds must not exceed telemetry.stale_after_seconds"
+        )
+    if router.enforce_rc_priority and (
+        router.approved_setpoint_system != ground_test.source_system
+        or router.approved_setpoint_component != ground_test.source_component
+    ):
+        raise ValueError(
+            "local Offboard takeoff must use the router-approved setpoint identity"
+        )
+
     return AppConfig(
         video=video,
         frame_interpolation=interpolation,
@@ -398,8 +707,11 @@ def load_config(path: str | Path) -> AppConfig:
         vision_models=vision_models,
         mavlink_router=router,
         telemetry=telemetry,
+        position_stream=position_stream,
         control=control,
         ground_offboard_test=ground_test,
         keyboard_control=keyboard,
+        takeoff=takeoff,
+        local_offboard_takeoff=local_takeoff,
         server=_load_section(ServerConfig, raw.get("server", {})),
     )

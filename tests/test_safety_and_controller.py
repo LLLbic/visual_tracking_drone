@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from threading import Event, Thread
+from time import sleep
 from time import monotonic
 import unittest
 
@@ -59,6 +61,51 @@ class SafetyAndControllerTests(unittest.TestCase):
         self.gate.reset_estop()
         preview = self.controller.compute(self.target, self.telemetry("OFFBOARD"), 1.5)
         self.assertFalse(preview.local_estop_latched)
+
+    def test_gate_can_start_fail_closed_without_sending_an_action(self) -> None:
+        gate = SafetyGate(initially_latched=True)
+        self.assertTrue(gate.estop_latched)
+
+    def test_guard_rejects_action_while_latched(self) -> None:
+        gate = SafetyGate(initially_latched=True)
+        called = False
+
+        def action() -> None:
+            nonlocal called
+            called = True
+
+        with self.assertRaisesRegex(ValueError, "锁存"):
+            gate.run_if_unlatched(action)
+        self.assertFalse(called)
+
+    def test_latch_waits_for_inflight_guarded_action_then_blocks_new_one(self) -> None:
+        gate = SafetyGate()
+        action_entered = Event()
+        release_action = Event()
+        latch_completed = Event()
+
+        def action() -> None:
+            action_entered.set()
+            self.assertTrue(release_action.wait(1.0))
+
+        action_thread = Thread(target=lambda: gate.run_if_unlatched(action))
+        action_thread.start()
+        self.assertTrue(action_entered.wait(1.0))
+
+        def engage() -> None:
+            gate.latch_estop()
+            latch_completed.set()
+
+        latch_thread = Thread(target=engage)
+        latch_thread.start()
+        sleep(0.03)
+        self.assertFalse(latch_completed.is_set())
+        release_action.set()
+        action_thread.join(1.0)
+        latch_thread.join(1.0)
+        self.assertTrue(latch_completed.is_set())
+        with self.assertRaisesRegex(ValueError, "锁存"):
+            gate.run_if_unlatched(lambda: None)
 
     def test_offboard_without_fresh_target_stays_closed(self) -> None:
         lost_target = TargetSnapshot(locked=False, track_id=7, source="lost", lost_frames=1)

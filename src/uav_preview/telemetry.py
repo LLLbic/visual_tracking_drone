@@ -2,13 +2,43 @@ from __future__ import annotations
 
 from dataclasses import replace
 from ipaddress import ip_address
-from math import degrees, isfinite
+from math import degrees, isfinite, isnan, sqrt
 import socket
 from threading import Event, Lock, Thread
 from time import monotonic
 
 from .config import TelemetryConfig
 from .types import TelemetrySnapshot
+from .navigation_health import estimator_ratio_reason
+from .flow_health import FlowMonitor
+
+
+def _estimator_ratio(value: object) -> tuple[float | None, str]:
+    if value is None:
+        return None, "missing"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, "invalid"
+    if not isfinite(numeric):
+        return None, "nonfinite"
+    return numeric, "invalid" if numeric < 0 else ("rejected" if numeric > 1 else "valid")
+
+
+def _smoothed_rate(
+    previous_hz: float | None,
+    previous_time: float | None,
+    now: float,
+) -> float | None:
+    if previous_time is None:
+        return previous_hz
+    period = now - previous_time
+    if period <= 0.0 or period > 10.0:
+        return previous_hz
+    instantaneous_hz = min(100.0, 1.0 / period)
+    if previous_hz is None:
+        return instantaneous_hz
+    return previous_hz * 0.65 + instantaneous_hz * 0.35
 
 
 def _stick_percent(value: float | int | None) -> float | None:
@@ -101,7 +131,12 @@ class PassiveMavlinkReceiver:
 
     def __init__(self, config: TelemetryConfig) -> None:
         self.config = config
+        self._flow = FlowMonitor(config.flow_minimum_quality, config.flow_sensor_id, config.flow_message_type)
+        # Hardware's mavlink status identifies the internal sensor as 0/158.
+        # If forwarded to the radio, inspect it without trusting it as FC state.
+        self._peripheral_flow = FlowMonitor(config.flow_minimum_quality, config.flow_sensor_id, config.flow_message_type)
         self._snapshot = TelemetrySnapshot(
+            flow_minimum_quality=config.flow_minimum_quality,
             qgc_forward_enabled=config.forward_qgc,
             qgc_forward_endpoint=(
                 f"{config.qgc_host}:{config.qgc_port}" if config.forward_qgc else ""
@@ -130,10 +165,13 @@ class PassiveMavlinkReceiver:
     def snapshot(self) -> TelemetrySnapshot:
         with self._lock:
             result = replace(self._snapshot)
+            result.flow_sources = self._flow.diagnostics(monotonic())
+            result.flow_sources.update({key:{**value,'selected':False}
+                for key,value in self._peripheral_flow.diagnostics(monotonic()).items()})
         result.connected = bool(
-            result.last_packet_monotonic is not None
-            and result.age_seconds() is not None
-            and result.age_seconds() <= self.config.stale_after_seconds
+            result.last_heartbeat_monotonic is not None
+            and monotonic() - result.last_heartbeat_monotonic
+            <= self.config.stale_after_seconds
         )
         return result
 
@@ -160,6 +198,15 @@ class PassiveMavlinkReceiver:
             return
 
         parser = mavlink2.MAVLink(None)
+        # UDP telemetry can occasionally contain a truncated frame or a stray
+        # byte (for example while the radio link is reconnecting).  With
+        # pymavlink's default strict parser, one bad datagram leaves the parser
+        # positioned inside that datagram and it may then reject one byte for
+        # every later datagram.  In practice this makes the web telemetry look
+        # permanently frozen even though the router is still receiving data.
+        # Robust parsing skips bad bytes up to the next MAVLink v1/v2 marker and
+        # lets the following valid frame update telemetry immediately.
+        parser.robust_parsing = True
         allowed_sources = set(self.config.allowed_source_ips)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         qgc_sock: socket.socket | None = None
@@ -212,6 +259,11 @@ class PassiveMavlinkReceiver:
                     messages = parser.parse_buffer(packet) or []
                 except Exception as exc:
                     self._set_error(f"MAVLink 解析失败：{exc}")
+                    # Do not carry a partially decoded datagram into the next
+                    # UDP packet.  Rebuilding the receive-only parser is safe:
+                    # it has no output stream and cannot send anything to PX4.
+                    parser = mavlink2.MAVLink(None)
+                    parser.robust_parsing = True
                     continue
                 for message in messages:
                     self._accept(message, address[0], mavutil)
@@ -229,6 +281,13 @@ class PassiveMavlinkReceiver:
         source_component = message.get_srcComponent()
         with self._lock:
             state = self._snapshot
+            if (source_system,source_component)==(0,158) and message_type in {"OPTICAL_FLOW","OPTICAL_FLOW_RAD"}:
+                # Diagnostic ONLY: no heartbeat, target ID, height, fusion or
+                # navigation permission may be inferred from peripheral traffic.
+                self._peripheral_flow.accept(message,now)
+                return
+            if source_component != 1 or (state.system_id is not None and source_system != state.system_id):
+                return
             state.last_packet_monotonic = now
             state.packets += 1
             state.source = source_ip
@@ -247,20 +306,118 @@ class PassiveMavlinkReceiver:
                 state.component_id = source_component
                 state.flight_mode = _flight_mode_string(message, mavutil)
                 state.armed = bool(getattr(message, "base_mode", 0) & 128)
+                state.last_heartbeat_monotonic = now
+            elif message_type == "ESTIMATOR_STATUS":
+                sample_id = getattr(message, "time_usec", None)
+                if type(sample_id) is not int or not 0 <= sample_id <= 0xFFFFFFFFFFFFFFFF:
+                    return  # No source timestamp: cannot refresh safety evidence.
+                previous_id = state.estimator_sample_id
+                if previous_id is not None:
+                    if sample_id == previous_id:
+                        return  # Duplicates must not inflate frequency/freshness.
+                    if sample_id < previous_id:
+                        state.navigation_fault = "估计器源时间倒退或飞控重启，请重新核验定位"
+                        return
+                state.estimator_sample_id = sample_id
+                state.estimator_hz = _smoothed_rate(state.estimator_hz, state.last_estimator_monotonic, now)
+                state.estimator_flags = int(message.flags)
+                state.estimator_velocity_ratio, state.estimator_velocity_ratio_status = _estimator_ratio(getattr(message, "vel_ratio", None))
+                state.estimator_position_ratio, state.estimator_position_ratio_status = _estimator_ratio(getattr(message, "pos_horiz_ratio", None))
+                raw_position_ratio = getattr(message, "pos_horiz_ratio", None)
+                state.estimator_position_ratio_is_nan = isinstance(raw_position_ratio, (float, int)) and isnan(raw_position_ratio)
+                state.last_estimator_monotonic = now
+                if state.armed is True:
+                    if state.estimator_flags & 15 != 15 or state.estimator_flags & (128 | 1024 | 2048):
+                        state.navigation_fault = "飞行中估计器有效性异常，请飞手接管"
+                    else:
+                        for label, ratio in (("速度", state.estimator_velocity_ratio), ("水平位置", state.estimator_position_ratio)):
+                            # Unavailable evidence is not an observed sensor failure.
+                            # Strict navigation still refuses it in its own gate;
+                            # fixed-hover checks PX4's relative estimate separately.
+                            if ratio is None:
+                                continue
+                            reason = estimator_ratio_reason(ratio, label)
+                            if reason:
+                                state.navigation_fault = "飞行中" + reason + "，请飞手接管"
+                                break
+            elif message_type in {"OPTICAL_FLOW", "OPTICAL_FLOW_RAD"}:
+                sample, error = self._flow.accept(message, now)
+                if sample is not None:
+                    state.flow_quality = sample.quality
+                    state.flow_source = sample.source
+                    state.flow_hz = self._flow.rate_hz
+                    state.last_flow_monotonic = sample.received
+                    state.flow_good_since_monotonic = self._flow.good_since
+                    state.flow_good_samples = self._flow.good_samples
+                    state.last_flow_bad_monotonic = self._flow.last_bad
+                    state.flow_error = error
+                elif error:
+                    state.flow_error = error
+                    state.flow_good_since_monotonic = None
+                    state.flow_good_samples = 0
+                    state.last_flow_bad_monotonic = now
+                if state.armed is True and error:
+                    state.navigation_fault = "飞行中" + error + "，撤销电脑导航，请飞手接管"
             elif message_type == "ATTITUDE":
                 state.roll_deg = degrees(float(message.roll))
                 state.pitch_deg = degrees(float(message.pitch))
                 state.yaw_deg = degrees(float(message.yaw))
+                state.last_attitude_monotonic = now
             elif message_type == "LOCAL_POSITION_NED":
+                sample_id = getattr(message,"time_boot_ms",None)
+                if type(sample_id) is int and 0 <= sample_id <= 0xFFFFFFFF:
+                    old_id = state.local_position_sample_id
+                    if old_id is not None:
+                        advance = (sample_id-old_id) & 0xFFFFFFFF
+                        if advance == 0:
+                            return  # retransmission is not a new position observation
+                        if advance >= 0x80000000:
+                            state.navigation_fault = "本地位置源时间倒退或飞控重启，禁止沿用旧坐标"
+                            return
+                    state.local_position_sample_id = sample_id
+                    state.last_distinct_position_monotonic = now
+                else:
+                    state.local_position_sample_id = None
+                    state.last_distinct_position_monotonic = None
+                previous = (state.local_x_m, state.local_y_m, state.local_z_m)
+                incoming = (float(message.x), float(message.y), float(message.z))
+                velocity = (float(message.vx), float(message.vy), float(message.vz))
+                dt = None if state.last_local_position_monotonic is None else now - state.last_local_position_monotonic
+                if state.armed is True:
+                    if not all(isfinite(v) for v in incoming + velocity):
+                        state.navigation_fault = "本地位置/速度出现非有限数值"
+                    elif dt is not None and 0 < dt <= 0.5 and all(v is not None and isfinite(v) for v in previous):
+                        # Heuristic discontinuity alarm, NOT an EKF reset counter.
+                        residual = sqrt(sum((new - old - speed * dt) ** 2
+                                            for new, old, speed in zip(incoming, previous, velocity)))
+                        if residual > 0.20:
+                            state.navigation_fault = "本地坐标疑似跳变（不等同已确认EKF重置），请接管"
+                state.local_position_hz = _smoothed_rate(
+                    state.local_position_hz,
+                    state.last_local_position_monotonic,
+                    now,
+                )
                 state.vx_m_s = float(message.vx)
                 state.vy_m_s = float(message.vy)
                 state.vz_m_s = float(message.vz)
-                state.altitude_m = -float(message.z)
+                state.local_x_m = float(message.x)
+                state.local_y_m = float(message.y)
+                state.local_z_m = float(message.z)
+                state.altitude_m = -state.local_z_m
+                state.last_local_position_monotonic = now
             elif message_type == "GLOBAL_POSITION_INT":
-                state.vx_m_s = float(message.vx) / 100.0
-                state.vy_m_s = float(message.vy) / 100.0
-                state.vz_m_s = float(message.vz) / 100.0
-                state.altitude_m = float(message.relative_alt) / 1000.0
+                state.global_position_hz = _smoothed_rate(
+                    state.global_position_hz,
+                    state.last_global_position_monotonic,
+                    now,
+                )
+                # Preserve local-NED velocity and its own freshness timestamp.
+                state.latitude_deg = float(message.lat) / 10_000_000.0
+                state.longitude_deg = float(message.lon) / 10_000_000.0
+                state.global_altitude_amsl_m = float(message.alt) / 1000.0
+                state.relative_altitude_m = float(message.relative_alt) / 1000.0
+                state.altitude_m = state.relative_altitude_m
+                state.last_global_position_monotonic = now
             elif message_type == "DISTANCE_SENSOR":
                 # Only a downward-facing sensor is a height-above-ground
                 # measurement. Horizontal obstacle sensors must not be shown
@@ -274,20 +431,46 @@ class PassiveMavlinkReceiver:
                 )
                 orientation = int(getattr(message, "orientation", -1))
                 current_cm = int(getattr(message, "current_distance", 0))
+                sensor_id = getattr(message, "id", None)
+                if orientation == downward and state.laser_sensor_id is not None and sensor_id != state.laser_sensor_id:
+                    state.navigation_fault = "对地测距源身份变化，禁止自动替换高度来源"
+                    return
+                if orientation == downward and not 0 < current_cm < 65535:
+                    state.last_laser_monotonic = None
+                    if state.armed is True:
+                        state.navigation_fault = "飞行中对地测距无效，请飞手接管"
+                    return
                 if orientation == downward and 0 < current_cm < 65535:
+                    if type(sensor_id) is not int or not 0 <= sensor_id <= 255:
+                        return
+                    stamp = getattr(message, "time_boot_ms", None)
+                    if type(stamp) is not int or not 0 <= stamp <= 0xFFFFFFFF:
+                        return
+                    if state.laser_sample_id is not None:
+                        advance = (stamp-state.laser_sample_id)&0xFFFFFFFF
+                        if advance == 0:
+                            return
+                        if advance >= 0x80000000:
+                            state.navigation_fault = "测距源时间倒退，请核验飞控/传感器"
+                            return
+                    state.laser_sample_id = stamp
+                    state.laser_hz = _smoothed_rate(state.laser_hz, state.last_laser_monotonic, now)
                     state.laser_height_m = current_cm / 100.0
                     state.laser_min_m = int(getattr(message, "min_distance", 0)) / 100.0
                     state.laser_max_m = int(getattr(message, "max_distance", 0)) / 100.0
                     state.laser_sensor_id = int(getattr(message, "id", 0))
                     state.last_laser_monotonic = now
             elif message_type == "RANGEFINDER":
-                # Compatibility path for older flight stacks that publish the
-                # dedicated RANGEFINDER message instead of DISTANCE_SENSOR.
-                distance_m = float(getattr(message, "distance", float("nan")))
-                if isfinite(distance_m) and distance_m >= 0.0:
-                    state.laser_height_m = distance_m
-                    state.last_laser_monotonic = now
+                # This legacy message has neither sensor identity nor source
+                # timestamp/range limits. It cannot refresh navigation evidence
+                # or overwrite a pinned down-facing DISTANCE_SENSOR.
+                pass
             elif message_type == "EXTENDED_SYS_STATE":
+                state.extended_state_hz = _smoothed_rate(
+                    state.extended_state_hz,
+                    state.last_extended_state_monotonic,
+                    now,
+                )
                 state.landed_state = {
                     0: "UNKNOWN",
                     1: "ON_GROUND",
@@ -295,6 +478,7 @@ class PassiveMavlinkReceiver:
                     3: "TAKEOFF",
                     4: "LANDING",
                 }.get(int(getattr(message, "landed_state", 0)), "UNKNOWN")
+                state.last_extended_state_monotonic = now
             elif message_type == "VFR_HUD":
                 state.throttle_pct = float(message.throttle)
                 if state.altitude_m is None:
@@ -315,6 +499,7 @@ class PassiveMavlinkReceiver:
                 state.rc_channel_6_pwm = int(getattr(message, "chan6_raw", 0)) or None
                 state.rc_channel_7_pwm = int(getattr(message, "chan7_raw", 0)) or None
                 state.rc_channel_8_pwm = int(getattr(message, "chan8_raw", 0)) or None
+                state.last_rc_channels_monotonic = now
             elif message_type == "STATUSTEXT":
                 text = getattr(message, "text", "")
                 if isinstance(text, bytes):
@@ -322,6 +507,9 @@ class PassiveMavlinkReceiver:
                 state.last_status_text = str(text).split("\0", 1)[0]
                 state.last_status_severity = int(getattr(message, "severity", 0))
                 state.last_status_monotonic = now
+                if state.armed is True and any(word in state.last_status_text.casefold() for word in
+                    ("primary ekf changed", "filter fault", "invalid setpoints")):
+                    state.navigation_fault = state.last_status_text
             elif message_type == "COMMAND_ACK":
                 state.last_command_ack_command = int(getattr(message, "command", 0))
                 state.last_command_ack_result = int(getattr(message, "result", 0))

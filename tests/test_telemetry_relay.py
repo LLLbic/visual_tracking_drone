@@ -80,6 +80,52 @@ class TelemetryRelayTests(unittest.TestCase):
             receiver.stop()
             output.close()
 
+    def test_recovers_immediately_after_invalid_mavlink_datagram(self) -> None:
+        try:
+            from pymavlink.dialects.v20 import common as mavlink2
+        except ImportError:
+            self.skipTest("pymavlink is not installed")
+
+        input_port = _free_udp_port()
+        receiver = PassiveMavlinkReceiver(
+            TelemetryConfig(
+                bind_host="127.0.0.1",
+                bind_port=input_port,
+                allowed_source_ips=["127.0.0.1"],
+            )
+        )
+        sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        encoder = mavlink2.MAVLink(None, srcSystem=1, srcComponent=1)
+        heartbeat = encoder.heartbeat_encode(
+            type=mavlink2.MAV_TYPE_QUADROTOR,
+            autopilot=mavlink2.MAV_AUTOPILOT_PX4,
+            base_mode=0,
+            custom_mode=6 << 16,
+            system_status=mavlink2.MAV_STATE_STANDBY,
+            mavlink_version=3,
+        ).pack(encoder)
+
+        try:
+            receiver.start()
+            sender.sendto(b"not-a-mavlink-frame", ("127.0.0.1", input_port))
+            sender.sendto(heartbeat, ("127.0.0.1", input_port))
+
+            for _ in range(40):
+                state = receiver.snapshot()
+                if state.connected:
+                    break
+                sleep(0.025)
+
+            state = receiver.snapshot()
+            self.assertTrue(state.connected)
+            self.assertEqual(state.flight_mode, "OFFBOARD")
+            self.assertEqual(state.received_datagrams, 2)
+            self.assertEqual(state.packets, 1)
+            self.assertEqual(state.error, "")
+        finally:
+            sender.close()
+            receiver.stop()
+
     def test_captures_mode_mapping_and_status_text_read_only(self) -> None:
         receiver = PassiveMavlinkReceiver(TelemetryConfig(enabled=False))
         receiver._accept(
@@ -97,6 +143,7 @@ class TelemetryRelayTests(unittest.TestCase):
         self.assertEqual(state.last_status_text, "Offboard mode rejected")
         self.assertEqual(state.last_status_severity, 4)
         self.assertIsNotNone(state.to_dict()["last_status_age_seconds"])
+        self.assertFalse(state.connected)
 
     def test_decodes_disarmed_px4_offboard_custom_main_mode(self) -> None:
         receiver = PassiveMavlinkReceiver(TelemetryConfig(enabled=False))
@@ -120,6 +167,7 @@ class TelemetryRelayTests(unittest.TestCase):
         state = receiver.snapshot()
         self.assertEqual(state.flight_mode, "OFFBOARD")
         self.assertFalse(state.armed)
+        self.assertTrue(state.connected)
 
     def test_uses_only_downward_distance_sensor_as_laser_height(self) -> None:
         receiver = PassiveMavlinkReceiver(TelemetryConfig(enabled=False))
@@ -145,6 +193,7 @@ class TelemetryRelayTests(unittest.TestCase):
                 "DISTANCE_SENSOR",
                 orientation=25,
                 current_distance=234,
+                time_boot_ms=100,
                 min_distance=20,
                 max_distance=1200,
                 id=7,
@@ -177,6 +226,45 @@ class TelemetryRelayTests(unittest.TestCase):
         self.assertEqual(state.last_command_ack_result, 0)
         self.assertEqual(state.last_command_ack_progress, 100)
         self.assertIsNotNone(state.to_dict()["last_command_ack_age_seconds"])
+        self.assertIsNotNone(state.to_dict()["extended_state_age_seconds"])
+
+    def test_captures_local_and_global_position_for_guarded_takeoff(self) -> None:
+        receiver = PassiveMavlinkReceiver(TelemetryConfig(enabled=False))
+        receiver._accept(
+            self._message(
+                "LOCAL_POSITION_NED",
+                x=1.25,
+                y=-2.5,
+                z=-0.4,
+                vx=0.1,
+                vy=0.2,
+                vz=-0.3,
+            ),
+            "127.0.0.1",
+            object(),
+        )
+        receiver._accept(
+            self._message(
+                "GLOBAL_POSITION_INT",
+                lat=302_500_000,
+                lon=1_197_500_000,
+                alt=102_400,
+                relative_alt=400,
+                vx=10,
+                vy=20,
+                vz=-30,
+            ),
+            "127.0.0.1",
+            object(),
+        )
+        state = receiver.snapshot()
+        self.assertEqual((state.local_x_m, state.local_y_m, state.local_z_m), (1.25, -2.5, -0.4))
+        self.assertAlmostEqual(state.latitude_deg or 0.0, 30.25)
+        self.assertAlmostEqual(state.longitude_deg or 0.0, 119.75)
+        self.assertAlmostEqual(state.global_altitude_amsl_m or 0.0, 102.4)
+        state_dict = state.to_dict()
+        self.assertIsNotNone(state_dict["local_position_age_seconds"])
+        self.assertIsNotNone(state_dict["global_position_age_seconds"])
 
     def test_nan_parameter_value_does_not_break_passive_receiver(self) -> None:
         receiver = PassiveMavlinkReceiver(TelemetryConfig(enabled=False))

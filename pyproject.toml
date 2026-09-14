@@ -46,7 +46,7 @@ explicit = true
 uav-preview = "uav_preview.main:main"
 
 [dependency-groups]
-dev = ["pytest>=8.4,<10"]
+dev = ["pytest>=8.4,<10", "httpx>=0.28,<1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

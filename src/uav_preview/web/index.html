@@ -86,6 +86,12 @@
     .arm-control strong { font-size:13px; }
     .estop-control { background:#351922; border-color:#a33b4d; }
     .command-state { color:var(--muted); font-size:11px; line-height:1.55; overflow-wrap:anywhere; }
+    .takeoff-control { display:grid; gap:10px; padding:12px; border:1px solid rgba(84,215,255,.34); border-radius:11px; background:rgba(18,42,55,.42); }
+    .takeoff-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .takeoff-row { display:grid; grid-template-columns:minmax(120px,.7fr) minmax(130px,1fr) minmax(110px,.7fr); gap:9px; align-items:end; }
+    .takeoff-progress { height:8px; border-radius:999px; overflow:hidden; background:#263349; }
+    .takeoff-progress i { display:block; width:0; height:100%; background:linear-gradient(90deg,var(--cyan),var(--green)); transition:width .2s linear; }
+    @media (max-width:620px) { .takeoff-row { grid-template-columns:1fr; } }
     @media (max-width:980px) { main { grid-template-columns:1fr; padding:8px 12px 22px; } header { padding:15px 13px 8px; align-items:flex-start; flex-direction:column; } .channel { grid-template-columns:74px minmax(65px,1fr) 39px; } }
   </style>
 </head>
@@ -98,7 +104,7 @@
     <section class="panel video-panel">
       <div class="panel-title"><strong>原始视频与视觉结果</strong><span id="vision-badge" class="badge">等待视频</span></div>
       <div class="video-stage">
-        <img id="video" src="/video.mjpg" alt="视频流">
+        <img id="video" alt="视频流">
       </div>
       <div class="flight-hud" aria-label="本地键盘虚拟遥控器测试面板">
           <div class="hud-head">
@@ -109,7 +115,7 @@
           <div class="channel-grid">
             <div class="channel"><span class="channel-label">Pitch <small>W/S</small></span><div class="channel-track"><i id="pitch-marker" class="channel-marker"></i></div><b id="pitch-channel" class="channel-value">1500</b></div>
             <div class="channel"><span class="channel-label">Roll <small>A/D</small></span><div class="channel-track"><i id="roll-marker" class="channel-marker"></i></div><b id="roll-channel" class="channel-value">1500</b></div>
-            <div class="channel"><span class="channel-label">Throttle <small>⇧/Alt</small></span><div class="channel-track"><i id="throttle-marker" class="channel-marker"></i></div><b id="throttle-channel" class="channel-value">1500</b></div>
+            <div class="channel"><span class="channel-label">垂直速度 <small>Shift上升 / Alt下降</small></span><div class="channel-track"><i id="throttle-marker" class="channel-marker"></i></div><b id="throttle-channel" class="channel-value">1500</b></div>
             <div class="channel"><span class="channel-label">Yaw <small>Q/E</small></span><div class="channel-track"><i id="yaw-marker" class="channel-marker"></i></div><b id="yaw-channel" class="channel-value">1500</b></div>
           </div>
           <div class="hud-footer">
@@ -126,26 +132,60 @@
               <button id="real-rtl" type="button" disabled>真实返航</button>
             </div>
           </div>
-          <div class="command-state" id="keyboard-command-state">地面起飞时仅Shift上升有效；飞控报告IN_AIR后才开放W/S/A/D/Alt/Q/E。</div>
+          <div class="command-state" id="keyboard-command-state">Shift/Alt发送的是上升/下降速度，不是电机油门。禁止从地面用键盘起飞；必须先由实体遥控器起飞，再以CH8切入Offboard。</div>
       </div>
       <div class="real-action-dock">
         <div class="panel-title"><strong>真实飞控动作</strong><span id="flight-action-badge" class="badge bad">安全锁定</span></div>
         <div class="real-actions">
-          <label class="safety-confirm"><input id="real-action-confirm" type="checkbox"><span>我已确认旋翼已拆除或无人机位于隔离测试区，周围无人，实体遥控器在线并可立即接管。</span></label>
+          <label class="safety-confirm"><input id="real-action-confirm" type="checkbox"><span>我已确认旋翼状态符合当前操作；若进行真实飞行，无人机位于隔离测试区、周围无人，实体遥控器在线并可立即接管。</span></label>
           <div class="real-action-row">
             <div class="arm-control">
-              <div><strong>ARM开关</strong><div class="command-state">真实COMMAND_LONG · 需要二次确认</div></div>
+              <div><strong>地面ARM开关</strong><div class="command-state">仅用于单独ARM/DISARM测试 · 自动起飞请使用下方状态机</div></div>
               <label class="switch" aria-label="真实飞控ARM开关"><input id="real-arm-toggle" type="checkbox" disabled><span class="slider"></span></label>
             </div>
             <div class="arm-control estop-control">
-              <div><strong>紧急制动锁存</strong><div class="command-state">打开即锁住网页ARM；解除不会自动解锁</div></div>
-              <label class="switch" aria-label="真实紧急制动锁存开关"><input id="emergency-latch-toggle" type="checkbox" disabled><span class="slider"></span></label>
+              <div><strong>安全处置锁存</strong><div class="command-state">地面DISARM · 空中LAND · 打开即关闭电脑TX</div></div>
+              <label class="switch" aria-label="真实安全处置锁存开关"><input id="emergency-latch-toggle" type="checkbox" disabled><span class="slider"></span></label>
             </div>
           </div>
-          <div id="emergency-latch-state" class="command-state">急停状态：未锁存。地面打开时发送正常DISARM；空中打开时发送PX4 Pause。</div>
-          <div id="flight-action-state" class="command-state">等待安全确认。电脑起飞需先稳定发送零速度、由飞手手动切入OFFBOARD，再解除实体急停并ARM。</div>
+          <div class="takeoff-control">
+            <div class="takeoff-head"><div><strong>指定高度自动起飞</strong><div class="command-state">地面稳定检查 → ARM确认 → PX4原生Takeoff → 高度与悬停验证</div></div><span id="takeoff-badge" class="badge warn">未启动</span></div>
+            <div class="takeoff-row">
+              <label>目标离地高度（1.0–3.0 m）<input id="takeoff-height" type="number" min="1" max="3" step="0.1" value="1.5"></label>
+              <button id="takeoff-start" type="button" disabled>启动指定高度起飞</button>
+              <button id="takeoff-abort" class="danger" type="button" disabled>取消 / 安全退出</button>
+            </div>
+            <div class="takeoff-progress"><i id="takeoff-progress"></i></div>
+            <div id="takeoff-state" class="command-state">默认关闭，不会随程序开机自动运行。</div>
+            <div class="ground-warning">真实飞行动作：高度被硬限制在1–3米。程序只发送一次ARM和一次PX4原生Takeoff，不改PX4参数、不发送RC覆盖、不自动切Offboard。实体CH6/CH8动作始终视为飞手接管。</div>
+          </div>
+          <div class="takeoff-control">
+            <div class="takeoff-head"><div><strong>本地 Offboard 指定高度起飞（无GPS）</strong><div class="command-state">记录当前本地高度 → 定点预发送 → 飞手手动CH8切Offboard → ARM → 限速爬升并持续悬停</div></div><span id="local-takeoff-badge" class="badge warn">未启动</span></div>
+            <div class="takeoff-row">
+              <label>相对当前高度（1.0–3.0 m）<input id="local-takeoff-height" type="number" min="1" max="3" step="0.1" value="1.5"></label>
+              <button id="local-takeoff-start" type="button" disabled>启动本地起飞预发送</button>
+              <button id="local-takeoff-abort" class="danger" type="button" disabled>受控退出 / LAND</button>
+            </div>
+            <div class="takeoff-progress"><i id="local-takeoff-progress"></i></div>
+            <div id="local-takeoff-state" class="command-state">默认关闭；点击后先保持当前位置，不会自动切换飞行模式。</div>
+            <details id="navigation-diagnostics" open>
+              <summary>定位安全检查：缺项与实测异常</summary>
+              <div id="navigation-evidence" class="command-state" style="white-space:pre-line"></div>
+              <div id="navigation-blockers" class="command-state warn" style="white-space:pre-line"></div>
+              <div id="navigation-warnings" class="command-state warn" style="white-space:pre-line"></div>
+            </details>
+            <div class="takeoff-row">
+              <button id="smooth-handoff-authorize" type="button" disabled>授权键盘（平滑交接 / 真实控制）</button>
+              <button id="smooth-handoff-revoke" type="button" disabled>撤销键盘 / 减速保持</button>
+            </div>
+            <div id="smooth-handoff-state" class="command-state">等待本地悬停；缺少真实光流融合或估计器重置数据时不允许交接。</div>
+            <div class="ground-warning">本地起飞后使用上方专用授权按钮，不打开旧的“真实TX”开关。必须连续稳定至少3秒且松开全部按键；同一轨迹持续发送位置和速度目标。撤销授权、网页失焦或输入超时会减速保持，不会自动恢复；定位失效/坐标重置则停止本次控制并提示实体遥控器接管。未经仿真和拆桨验证，不作实飞安全保证。</div>
+            <div class="ground-warning">真实飞行动作：必须从DISARMED + ON_GROUND + Position开始。页面提示“现在切CH8”前不要拨动模式开关；进入Offboard后程序才ARM。达到目标后仍会持续发送定点保持，飞手将CH8切回Position会立即停止电脑设定值并接管。无全球定位时不要依赖RTL。</div>
+          </div>
+          <div id="emergency-latch-state" class="command-state">安全处置：未锁存。地面打开时发送正常DISARM；空中打开时发送LAND，绝不在空中强制停桨。</div>
+          <div id="flight-action-state" class="command-state">等待安全确认。可单独ARM测试，或使用1–3米指定高度起飞状态机；稳定悬停后仍需由飞手用CH8切入Offboard。</div>
           <div id="command-ack" class="command-state">飞控确认：--</div>
-          <div class="ground-warning">这里的操作会真实发送给飞控。紧急制动锁存只禁止本网页ARM：地面发送正常DISARM，空中发送与QGC一致的PX4 Pause，不会直接停桨；它无法禁止实体遥控器或QGC解锁。键盘控制采用受保护的Offboard速度设定值，不修改PX4参数、不发送MANUAL_CONTROL或RC覆盖。</div>
+          <div class="ground-warning">这里的操作会真实发送给飞控。安全处置锁存只禁止本网页ARM：地面发送正常DISARM，空中请求LAND；它不能代替实体Kill Switch，也不能禁止实体遥控器或QGC再次解锁。任何飞控拒绝都会以红色COMMAND_ACK显示。键盘控制不修改PX4参数、不发送MANUAL_CONTROL或RC覆盖。</div>
         </div>
       </div>
       <div class="hint"><span>点击当前模型产生的目标框进行锁定；切换模型会自动取消锁定。</span><span id="video-meta">--</span></div>
@@ -171,6 +211,7 @@
           <div class="metric wide"><span>PX4 最新状态提示</span><b id="status-text" style="font-size:13px">--</b></div>
           <div class="metric wide"><span>来源与新鲜度</span><b id="source" style="font-size:13px">--</b></div>
           <div class="metric wide"><span>遥测链路（本地双向路由 → QGC / 网页）</span><b id="relay" style="font-size:13px">--</b></div>
+          <div class="metric wide"><span>遥测实际频率（频率达标不等于定位健康）</span><b id="position-stream" style="font-size:13px">--</b></div>
           <div class="metric wide"><span>控制权限保护</span><b id="authority" style="font-size:13px">--</b></div>
         </div>
       </section>
@@ -184,12 +225,12 @@
         </div>
       </section>
       <section class="panel">
-        <div class="panel-title"><strong>Offboard 起飞预备 / 零速度设定值</strong><span id="offboard-test-badge" class="badge">关闭</span></div>
+        <div class="panel-title"><strong>Offboard 地面链路测试 / 零速度设定值</strong><span id="offboard-test-badge" class="badge">关闭</span></div>
         <div class="offboard-test">
           <div class="toggle-row">
             <div class="toggle-copy">
               <strong>手动发送开关</strong>
-              <small>先稳定预发送，再由飞手手动切入OFFBOARD；本开关不会切模式或ARM</small>
+              <small>仅用于拆桨后的QGC Inspector链路验证；不会切模式、ARM或起飞</small>
             </div>
             <label class="switch" aria-label="地面 Offboard 零速度设定值发送开关">
               <input id="offboard-test-toggle" type="checkbox">
@@ -200,10 +241,10 @@
             <div class="metric"><span>固定频率</span><b id="offboard-test-rate">5.0 Hz</b></div>
             <div class="metric"><span>已发包</span><b id="offboard-test-packets">0</b></div>
             <div class="metric"><span>最近发送</span><b id="offboard-test-age">--</b></div>
-            <div class="metric"><span>ARM预备</span><b id="offboard-test-ready">未就绪</b></div>
+            <div class="metric"><span>稳定发送</span><b id="offboard-test-ready">未启动</b></div>
           </div>
           <div class="metric"><span>数传上行与当前状态</span><b id="offboard-test-state" style="font-size:13px">默认关闭</b></div>
-          <div class="ground-warning">安全边界：预备阶段只发送 vx=vy=vz=0（5 Hz），不会自行切换模式或ARM。稳定满1.2秒、飞手手动切入OFFBOARD、飞机明确ON_GROUND且实体急停已解除后，网页ARM才开放。ARM后电机可能按PX4设置怠速旋转；开启键盘TX后，飞控报告IN_AIR前只接受Shift上升。</div>
+          <div class="ground-warning">安全边界：此测试只发送 vx=vy=vz=0（5 Hz），必须在拆桨或实体急停触发、DISARMED + ON_GROUND时使用。它不再参与ARM或起飞流程；网页ARM前必须先关闭本测试。</div>
         </div>
       </section>
       <section class="panel">
@@ -219,7 +260,7 @@
         </div>
         <div class="actions">
           <button id="clear-target">取消锁定</button>
-          <div class="note">此区域只管理目标锁定与电脑端跟踪安全门。紧急制动锁存已经统一到视频下方的真实飞控动作区，不再保留重复按钮；程序不会自动切换模式。</div>
+          <div class="note">此区域只管理目标锁定与电脑端跟踪安全门。安全处置锁存已经统一到视频下方的真实飞控动作区，不再保留重复按钮；程序不会自动切换模式。</div>
         </div>
       </section>
       <section class="panel">
@@ -280,6 +321,7 @@
     }
     window.addEventListener('keydown', event=>{
       if(!SIM_KEY_BINDINGS[event.code] || isTypingTarget(event.target)) return;
+      if(event.repeat && !simPressed.has(event.code)) return;
       event.preventDefault(); simPressed.add(event.code);
     });
     window.addEventListener('keyup', event=>{
@@ -292,10 +334,10 @@
     let keyboardControlBusy=false, keyboardControlEnabled=false, keyboardAxesBusy=false;
     function normalizedKeyboardAxes() {
       return {
-        pitch:(simChannels.pitch-1500)/500,
-        roll:(simChannels.roll-1500)/500,
-        throttle:(simChannels.throttle-1500)/500,
-        yaw:(simChannels.yaw-1500)/500,
+        pitch:targetForAxis('pitch')===1500?0:(simChannels.pitch-1500)/500,
+        roll:targetForAxis('roll')===1500?0:(simChannels.roll-1500)/500,
+        throttle:targetForAxis('throttle')===1500?0:(simChannels.throttle-1500)/500,
+        yaw:targetForAxis('yaw')===1500?0:(simChannels.yaw-1500)/500,
       };
     }
     async function sendKeyboardAxes() {
@@ -306,12 +348,112 @@
       finally { keyboardAxesBusy=false; }
     }
     setInterval(sendKeyboardAxes,100);
+    // This is input/permission only. It never starts another MAVLink sender.
+    const handoffClient=crypto.randomUUID();
+    let handoffRun=null, handoffToken=null, handoffSequence=0, handoffRevision=-1;
+    let handoffState={}, handoffActive=false, handoffBusy=false, handoffInputBusy=false;
+    let handoffDisabled=false;
+    function localTakeoffNavigation(s) {
+      const n=s.navigation_safety||{};
+      return {
+        blockReason:n.local_takeoff_block_reason??n.block_reason??'',
+        blockers:[...new Set((n.local_takeoff_block_reasons||[...(n.block_reasons||[]),n.local_takeoff_block_reason]).filter(Boolean))],
+        warnings:n.local_takeoff_warnings||[],
+      };
+    }
+    function adoptHandoff(lh) {
+      // A stale response from an old session must never re-open this UI.
+      if(lh.keyboard_handoff_enabled===false) handoffDisabled=true;
+      if(handoffDisabled) {
+        handoffRun=null; handoffToken=null; handoffSequence=0; handoffRevision=-1;
+        handoffState={}; handoffActive=false;
+        $('smooth-handoff-authorize').disabled=true;
+        $('smooth-handoff-revoke').disabled=true;
+        $('smooth-handoff-state').textContent='仅起飞悬停：键盘交接已关闭；到达目标高度后持续保持原位置与航向，不自动交接。';
+        $('smooth-handoff-state').className='command-state';
+        return;
+      }
+      const h=lh.handoff||{};
+      if(h.run_id!==handoffRun) {
+        handoffRun=h.run_id||null; handoffToken=null; handoffSequence=0; handoffRevision=-1;
+      }
+      if((h.revision??0)<handoffRevision) return;
+      handoffRevision=h.revision??0; handoffState=h; handoffActive=Boolean(lh.active);
+      if(!h.authorized||!handoffActive||h.terminal) handoffToken=null;
+      $('smooth-handoff-authorize').disabled=handoffBusy||!handoffActive||!h.ready||h.authorized||!$('real-action-confirm').checked||document.hidden||!document.hasFocus()||simPressed.size>0;
+      $('smooth-handoff-revoke').disabled=handoffBusy||!handoffToken;
+      const phases={KEYBOARD_READY:'键盘待命',MOVING:'限加速度运动',BRAKING:'减速中',LIMIT_BRAKING:'目标边界减速',POSITION_HOLD:'位置保持',HOLDING:'悬停验证'};
+      const owner=h.authorized?(handoffToken?'已授权本页键盘':'另一网页持有授权'):(h.terminal?'本次会话已终止':'未授权');
+      $('smooth-handoff-state').textContent=`${owner} · ${phases[h.phase]||h.phase||'等待任务'} · 连续稳定 ${number(h.stable_seconds||0,1)} / 3.0 s · ${h.reason||'可操作'}${h.awaiting_neutral?' · 必须先松键':''}`;
+      if(h.checks?.horizontal_error_m!=null) $('smooth-handoff-state').textContent+=` · 水平误差 ${number(h.checks.horizontal_error_m,2,' m')} / 0.15 m · 水平速度 ${number(h.checks.horizontal_speed_m_s,2,' m/s')} / 0.08 m/s · 位置样本 ${h.position_samples||0}`;
+      $('smooth-handoff-state').className=`command-state ${h.terminal?'bad':(h.authorized?'ok':'warn')}`;
+    }
+    async function sendHandoffInput() {
+      if(!handoffActive||!handoffRun||handoffState.terminal||handoffInputBusy||handoffBusy) return;
+      // A second tab must not impersonate the authorized client.
+      if(handoffState.authorized&&!handoffToken) return;
+      const run=handoffRun;
+      const foreground=!document.hidden&&document.hasFocus();
+      handoffInputBusy=true;
+      try {
+        const r=await post('/api/local-takeoff/keyboard/input',{
+          run_id:run,client_id:handoffClient,sequence:++handoffSequence,token:handoffToken,
+          ...(foreground?normalizedKeyboardAxes():{pitch:0,roll:0,throttle:0,yaw:0}),
+          keys_released:simPressed.size===0,foreground,confirmed:$('real-action-confirm').checked,
+        });
+        if(run===handoffRun) adoptHandoff(r.state);
+      } catch(e) {
+        // Never retry with an old permission after any ambiguous response.
+        handoffToken=null;
+        $('smooth-handoff-state').textContent='键盘输入暂停：'+e.message+'；请查看授权状态';
+      } finally { handoffInputBusy=false; }
+    }
+    setInterval(sendHandoffInput,100);
+    window.addEventListener('blur',sendHandoffInput);
+    document.addEventListener('visibilitychange',()=>{if(document.hidden) sendHandoffInput();});
+    $('real-action-confirm').addEventListener('change',()=>{if(!$('real-action-confirm').checked) {resetSimKeys();sendHandoffInput();}});
+    $('smooth-handoff-authorize').addEventListener('click',async()=>{
+      if(handoffBusy||!handoffRun||!handoffState.ready||simPressed.size||!$('real-action-confirm').checked||document.hidden||!document.hasFocus()) return;
+      const run=handoffRun;
+      handoffBusy=true;
+      try {
+        const waitStart=performance.now();
+        while(handoffInputBusy) {
+          if(performance.now()-waitStart>250) throw new Error('输入链路繁忙，未授权；请等待状态恢复后重试');
+          await new Promise(resolve=>setTimeout(resolve,10));
+        }
+        // No blocking modal: that would freeze the foreground/input watchdog.
+        const r=await post('/api/local-takeoff/keyboard/authorize',{run_id:run,client_id:handoffClient,confirmation:'HANDOFF'});
+        if(run!==handoffRun) return;
+        handoffToken=r.token;
+        resetSimKeys();
+        adoptHandoff(r.state);
+        if(document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        $('message').textContent=r.message+'。先松开全部按键，再按W/S/A/D、Shift/Alt、Q/E。';
+      } catch(e) {handoffToken=null;$('message').textContent=e.message;}
+      finally {handoffBusy=false;sendHandoffInput();}
+    });
+    $('smooth-handoff-revoke').addEventListener('click',async()=>{
+      if(handoffBusy||!handoffToken) return;
+      const run=handoffRun, token=handoffToken;
+      handoffBusy=true; resetSimKeys();
+      try {
+        const r=await post('/api/local-takeoff/keyboard/revoke',{run_id:run,client_id:handoffClient,token});
+        if(run===handoffRun) adoptHandoff(r.state);
+        $('message').textContent=r.message;
+      } catch(e) {$('message').textContent=e.message;}
+      finally {handoffToken=null;handoffBusy=false;}
+    });
+    setInterval(()=>{
+      if(!document.hidden && document.hasFocus() && $('real-action-confirm').checked)
+        post('/api/keyboard-control/presence').catch(()=>{});
+    },250);
     $('keyboard-control-toggle').addEventListener('change',async event=>{
       const requested=event.currentTarget.checked;
       event.currentTarget.checked=!requested;
       if(requested) {
         if(!$('real-action-confirm').checked) { $('message').textContent='请先勾选现场安全确认。'; return; }
-        if(!window.confirm('开启后键盘将真实发送Offboard速度设定值。ARMED且仍在地面时仅Shift上升有效；飞控确认IN_AIR后才开放其余方向键。确认继续吗？')) return;
+        if(!window.confirm('开启后键盘将真实发送Offboard速度设定值。仅允许ARMED + IN_AIR + OFFBOARD，且实体CH8仍在Offboard位置。Shift/Alt是垂直速度，不是油门；本程序禁止从地面起飞。确认继续吗？')) return;
       }
       keyboardControlBusy=true;
       try {
@@ -330,14 +472,55 @@
     }
     $('real-land').onclick=()=>sendHighLevelAction('land','降落');
     $('real-rtl').onclick=()=>sendHighLevelAction('rtl','返航');
-    let realActionBusy=false;
+    let realActionBusy=false, takeoffBusy=false, takeoffInputInitialized=false, localTakeoffBusy=false, localTakeoffInputInitialized=false;
+    $('takeoff-start').addEventListener('click',async()=>{
+      if(!$('real-action-confirm').checked) { $('message').textContent='请先完成真实飞行动作的现场安全确认。'; return; }
+      const height=Number($('takeoff-height').value);
+      if(!Number.isFinite(height)||height<1||height>3) { $('message').textContent='起飞高度只能设置为1.0至3.0米。'; return; }
+      if(!window.confirm(`即将启动真实的${height.toFixed(1)}米自动起飞：程序会在检查通过后发送ARM和PX4原生Takeoff。请确认旋翼已正确安装、场地隔离、GPS/定位有效、实体遥控器在线且可立即接管。继续吗？`)) return;
+      takeoffBusy=true;
+      try {
+        const r=await post('/api/takeoff/start',{target_height_m:height,confirmation:'TAKEOFF'});
+        $('message').textContent=r.message;
+      } catch(e) { $('message').textContent=e.message; }
+      finally { takeoffBusy=false; }
+    });
+    $('takeoff-abort').addEventListener('click',async()=>{
+      takeoffBusy=true;
+      try {
+        const r=await post('/api/takeoff/abort',{confirmation:'ABORT'});
+        $('message').textContent=r.message;
+      } catch(e) { $('message').textContent=e.message; }
+      finally { takeoffBusy=false; }
+    });
+    $('local-takeoff-start').addEventListener('click',async()=>{
+      if(!$('real-action-confirm').checked) { $('message').textContent='请先完成真实飞行动作的现场安全确认。'; return; }
+      const height=Number($('local-takeoff-height').value);
+      if(!Number.isFinite(height)||height<1||height>3) { $('message').textContent='本地起飞高度只能设置为1.0至3.0米。'; return; }
+      if(!window.confirm(`即将启动本地Offboard起飞，目标为当前高度上方${height.toFixed(1)}米。等待提示后由你用实体CH8切入Offboard，程序将ARM并爬升。起飞后继续保持原位置，不会自动开启键盘真实TX。光流与估计器健康验证尚未完成，本版本不代表实飞安全验收。确认继续吗？`)) return;
+      localTakeoffBusy=true;
+      try {
+        const r=await post('/api/local-takeoff/start',{target_height_m:height,confirmation:'TAKEOFF'});
+        $('message').textContent=r.message;
+      } catch(e) { $('message').textContent=e.message; }
+      finally { localTakeoffBusy=false; }
+    });
+    $('local-takeoff-abort').addEventListener('click',async()=>{
+      if(!window.confirm('受控退出将停止本地起飞流程：若已在空中会请求LAND，若仍在地面会正常DISARM。继续吗？')) return;
+      localTakeoffBusy=true;
+      try {
+        const r=await post('/api/local-takeoff/abort',{confirmation:'ABORT'});
+        $('message').textContent=r.message;
+      } catch(e) { $('message').textContent=e.message; }
+      finally { localTakeoffBusy=false; }
+    });
     $('real-arm-toggle').addEventListener('change', async event=>{
       const requested=event.currentTarget.checked;
       event.currentTarget.checked=!requested;
       if(!$('real-action-confirm').checked) { $('message').textContent='请先完成真实飞控动作的现场安全确认。'; return; }
       const action=requested?'ARM':'DISARM';
       const actionHint=requested
-        ? '电脑ARM要求零速度预备已就绪、飞手已手动切入OFFBOARD且实体急停已解除。ARM后电机可能立即怠速旋转。'
+        ? '网页ARM只允许地面Position/手动辅助模式，要求实体CH6急停已解除、CH8已离开Offboard。ARM后电机可能立即怠速旋转；请继续用实体遥控器起飞。'
         : 'DISARM只允许飞控明确报告已落地时发送。';
       if(!window.confirm(`即将向真实无人机发送 ${action} 命令。${actionHint} 确认现场安全并继续吗？`)) return;
       realActionBusy=true;
@@ -351,8 +534,8 @@
       const requested=event.currentTarget.checked;
       event.currentTarget.checked=!requested;
       if(!requested) {
-        if(!$('real-action-confirm').checked) { $('message').textContent='解除紧急制动前，请先完成现场安全确认。'; return; }
-        if(!window.confirm('解除网页紧急制动锁存后，将重新允许网页ARM。解除本身不会自动ARM，确认继续吗？')) return;
+        if(!$('real-action-confirm').checked) { $('message').textContent='解除安全处置锁存前，请先完成现场安全确认。'; return; }
+        if(!window.confirm('仅在实时遥测确认 DISARMED + ON_GROUND、实体CH6急停保持高位、CH8离开Offboard且所有电脑发送器均停止时，才允许解除网页锁存。解除本身不会自动ARM，确认继续吗？')) return;
       }
       realActionBusy=true;
       try {
@@ -372,15 +555,37 @@
       try { const r = await post('/api/target/select', {x:(event.clientX-rect.left)/rect.width, y:(event.clientY-rect.top)/rect.height}); $('message').textContent=r.message; }
       catch(e) { $('message').textContent=e.message; }
     });
-    let videoReconnectTimer = null;
-    function reconnectVideo() {
-      clearTimeout(videoReconnectTimer);
-      $('video').src=`/video.mjpg?reconnect=${Date.now()}`;
+    let videoPullGeneration=0, lastVideoSerial=-1, videoObjectUrl=null;
+    async function pullLatestVideo(generation) {
+      while(generation===videoPullGeneration) {
+        try {
+          const response=await fetch(`/video/latest.jpg?after=${lastVideoSerial}`, {cache:'no-store'});
+          if(generation!==videoPullGeneration) return;
+          if(response.status===204) continue;
+          if(!response.ok) throw new Error(`HTTP ${response.status}`);
+          const serial=Number(response.headers.get('X-Frame-Serial'));
+          const blob=await response.blob();
+          if(generation!==videoPullGeneration) return;
+          const nextUrl=URL.createObjectURL(blob), previousUrl=videoObjectUrl;
+          const image=$('video');
+          image.src=nextUrl;
+          try { await image.decode(); } catch(error) { URL.revokeObjectURL(nextUrl); throw error; }
+          if(generation!==videoPullGeneration) { URL.revokeObjectURL(nextUrl); return; }
+          videoObjectUrl=nextUrl;
+          if(previousUrl) URL.revokeObjectURL(previousUrl);
+          if(Number.isFinite(serial)) lastVideoSerial=serial;
+        } catch(error) {
+          if(generation!==videoPullGeneration) return;
+          $('message').textContent=`最新帧读取失败，正在重试：${error.message}`;
+          await new Promise(resolve=>setTimeout(resolve,250));
+        }
+      }
     }
-    $('video').addEventListener('error', () => {
-      clearTimeout(videoReconnectTimer);
-      videoReconnectTimer=setTimeout(reconnectVideo, 1000);
-    });
+    function reconnectVideo() {
+      videoPullGeneration+=1;
+      lastVideoSerial=-1;
+      void pullLatestVideo(videoPullGeneration);
+    }
     $('clear-target').onclick = () => post('/api/target/clear').catch(e => $('message').textContent=e.message);
     $('apply-model').onclick = async () => {
       const modelId=$('model-select').value;
@@ -400,7 +605,7 @@
       event.currentTarget.checked=!requested;
       if(requested) {
         if(!$('real-action-confirm').checked) { $('message').textContent='请先完成真实飞控动作的现场安全确认。'; return; }
-        if(!window.confirm('将以5 Hz真实发送零速度Offboard预备流。本操作不会ARM或切换模式；请保持无人机在地面并由飞手掌握实体遥控器。确认继续吗？')) return;
+        if(!window.confirm('将以5 Hz真实发送零速度Offboard地面测试流。本操作仅用于拆桨后的QGC Inspector验证，不会ARM、切换模式或起飞。确认继续吗？')) return;
       }
       offboardToggleBusy=true;
       event.currentTarget.disabled=true;
@@ -427,7 +632,7 @@
     let modelsLoaded=false;
     async function refresh() {
       try {
-        const s=await (await fetch('/api/state')).json(), t=s.telemetry, v=s.vision, p=s.command_preview, target=v.target, o=s.ground_offboard_test, k=s.keyboard_control||{}, m=s.models, f=s.flight_actions||{};
+        const s=await (await fetch('/api/state')).json(), t=s.telemetry, v=s.vision, p=s.command_preview, target=v.target, o=s.ground_offboard_test, k=s.keyboard_control||{}, m=s.models, f=s.flight_actions||{}, e=s.emergency_action||{}, h=s.takeoff||{}, lh=s.local_takeoff||{}, ps=s.position_stream||{};
         $('mode').textContent=t.flight_mode || '--'; $('armed').textContent=t.armed==null?'--':(t.armed?'YES':'NO'); $('alt').textContent=number(t.altitude_m,1,' m');
         const hasLaser=t.laser_height_m!=null && t.laser_age_seconds!=null, laserFresh=hasLaser&&t.laser_age_seconds<=5;
         $('laser-height').textContent=hasLaser?`激光高度：${number(t.laser_height_m,2,' m')} · ${number(t.laser_age_seconds,1,' s')}前${laserFresh?'':'（已过期）'}`:'激光高度：无测距数据';
@@ -447,6 +652,8 @@
         $('source').textContent=`${t.source || '--'} · ${number(t.age_seconds,2,' s')} · ${t.packets || 0} 包`;
         const r=s.mavlink_router||{};
         $('relay').textContent=r.enabled ? `本地双向路由：${r.ready?'在线':'离线'} · 数传→QGC/网页 ${r.vehicle_datagrams_received||0} · 本地→数传 ${r.local_datagrams_forwarded||0}${r.error?' · '+r.error:''}` : (t.qgc_forward_enabled ? `内置分流：${t.received_datagrams||0} / ${t.forwarded_datagrams||0} / ${t.dropped_datagrams||0} → ${t.qgc_forward_endpoint}` : `监听 127.0.0.1:14550 · 已收 ${t.received_datagrams||0} · 丢弃 ${t.dropped_datagrams||0}`);
+        $('position-stream').textContent=`本地 ${number(t.local_position_hz,1,' Hz')} · 全球 ${number(t.global_position_hz,1,' Hz')}${ps.require_global_position===false?'（本地模式非必需）':''} · 落地 ${number(t.extended_state_hz,1,' Hz')} · 估计器 ${number(t.estimator_hz,1,' Hz')} · ${ps.status||'--'} · ${ps.last_reason||'等待检测'} · 请求 ${ps.requests_sent||0} 条`;
+        $('position-stream').className=ps.status==='EFFECTIVE'?'ok':(ps.error?'bad':'warn');
         const blocked=(r.blocked_manual_control||0)+(r.blocked_rc_override||0)+(r.blocked_unapproved_setpoint||0)+(r.blocked_reflected_vehicle||0)+(r.blocked_reflected_setpoint||0)+(r.blocked_malformed_uplink||0);
         $('authority').textContent=r.rc_priority_enforced ? `实体RC摇杆最高优先级 · QGC模式/解锁/起降/返航/制动可用 · 已拦截 ${blocked} 包（虚拟摇杆 ${r.blocked_manual_control||0} / RC覆盖 ${r.blocked_rc_override||0} / 未授权连续设定值 ${r.blocked_unapproved_setpoint||0} / 遥测回环 ${r.blocked_reflected_vehicle||0} / 设定值回环 ${r.blocked_reflected_setpoint||0}）${r.last_blocked_reason?' · '+r.last_blocked_reason:''}` : '权限保护未启用';
         $('authority').className=r.rc_priority_enforced?'ok':'bad';
@@ -471,36 +678,109 @@
         $('offboard-test-ready').className=o.ready_for_offboard_arm?'ok':'warn';
         $('offboard-test-state').textContent=`${o.uplink_endpoint} · ${o.enabled?'发送零速度中':(o.last_stop_reason||'已关闭')}${o.error?' · '+o.error:''}`;
         $('offboard-test-state').className=o.enabled?'ok':(o.error?'bad':'warn');
+        if(k.enabled && (!keyboardControlEnabled || k.awaiting_neutral)) {
+          simPressed.clear();
+          Object.keys(simChannels).forEach(axis=>simChannels[axis]=1500);
+          renderSimChannels();
+        }
         keyboardControlEnabled=Boolean(k.enabled);
-        if(!keyboardControlBusy) { $('keyboard-control-toggle').checked=keyboardControlEnabled; $('keyboard-control-toggle').disabled=!k.available||!t.connected; }
-        $('keyboard-tx-state').textContent=keyboardControlEnabled?`真实TX ${k.mode||''}`:'真实TX关闭';
-        $('keyboard-tx-state').className=`sim-action-state ${keyboardControlEnabled?'bad':'warn'}`;
-        $('keyboard-command-state').textContent=keyboardControlEnabled?`已发 ${k.packets_sent||0} 包 · 前 ${number(k.forward_m_s,2)} m/s · 右 ${number(k.right_m_s,2)} m/s · 下 ${number(k.down_m_s,2)} m/s · Yaw ${number(k.yaw_rate_deg_s,1)}°/s${k.mode==='GROUND_TAKEOFF'?' · 地面保护：仅Shift上升有效':''}${k.watchdog_zero_active?' · 看门狗已归零':''}`:`${k.last_stop_reason||'默认关闭'}${k.error?' · '+k.error:''}`;
-        const manualArmModes=['MANUAL','STABILIZED','ALTCTL','POSCTL','POSITION'];
         const safetyConfirmed=$('real-action-confirm').checked;
         const estopLatched=Boolean(p.local_estop_latched);
         const modeName=String(t.flight_mode||'').toUpperCase();
-        const canManualArm=t.connected&&t.armed===false&&!o.enabled&&!k.enabled&&!estopLatched&&manualArmModes.includes(modeName);
-        const canPreparedOffboardArm=t.connected&&t.armed===false&&o.enabled&&o.ready_for_offboard_arm&&!k.enabled&&!estopLatched&&modeName==='OFFBOARD'&&t.landed_state==='ON_GROUND'&&!killEngaged&&t.rc_channel_6_pwm!=null;
-        const canArm=s.build?.guarded_computer_arm_and_shift_takeoff?canPreparedOffboardArm:(canManualArm||canPreparedOffboardArm);
+        const rcOffboardSelected=t.rc_channel_8_pwm!=null&&Number(t.rc_channel_8_pwm)>=1800;
+        const canKeyboardTx=t.connected&&t.armed===true&&t.landed_state==='IN_AIR'&&modeName==='OFFBOARD'&&!killEngaged&&rcOffboardSelected&&!estopLatched;
+        if(!keyboardControlBusy) { $('keyboard-control-toggle').checked=keyboardControlEnabled; $('keyboard-control-toggle').disabled=!k.available||(!keyboardControlEnabled&&!canKeyboardTx); }
+        $('keyboard-tx-state').textContent=keyboardControlEnabled?`真实TX ${k.mode||''}`:'真实TX关闭';
+        if(keyboardControlEnabled) $('keyboard-tx-state').textContent+=' · '+({BRAKING:'减速待稳定',MOVING:'限加速度运动',POSITION_HOLD:'位置保持'}[k.motion_phase]||k.motion_phase||'');
+        $('keyboard-tx-state').className=`sim-action-state ${keyboardControlEnabled?'bad':'warn'}`;
+        $('keyboard-command-state').textContent=keyboardControlEnabled?`已发 ${k.packets_sent||0} 包 · 前 ${number(k.forward_m_s,2)} m/s · 右 ${number(k.right_m_s,2)} m/s · 下 ${number(k.down_m_s,2)} m/s · Yaw ${number(k.yaw_rate_deg_s,1)}°/s${k.watchdog_zero_active?' · 看门狗已归零':''}`:`${k.last_stop_reason||'默认关闭'}${k.error?' · '+k.error:''} · Shift/Alt为垂直速度，地面键盘起飞已禁用`;
+        const manualArmModes=['MANUAL','STABILIZED','ALTCTL','POSCTL','POSITION'];
+        const nativeTakeoffActive=Boolean(h.active), localTakeoffActive=Boolean(lh.active), takeoffActive=nativeTakeoffActive||localTakeoffActive;
+        const canArm=t.connected&&t.armed===false&&t.landed_state==='ON_GROUND'&&!o.enabled&&!k.enabled&&!takeoffActive&&!estopLatched&&manualArmModes.includes(modeName)&&t.rc_channel_6_pwm!=null&&!killEngaged&&t.rc_channel_8_pwm!=null&&!rcOffboardSelected;
         const canDisarm=t.connected&&t.armed===true&&t.landed_state==='ON_GROUND';
+        const positionFresh=t.local_position_age_seconds!=null&&t.local_position_age_seconds<=1&&t.global_position_age_seconds!=null&&t.global_position_age_seconds<=1;
+        const flightStateFresh=t.heartbeat_age_seconds!=null&&t.heartbeat_age_seconds<=1.5&&t.attitude_age_seconds!=null&&t.attitude_age_seconds<=1.5&&t.extended_state_age_seconds!=null&&t.extended_state_age_seconds<=1.5&&t.rc_channels_age_seconds!=null&&t.rc_channels_age_seconds<=1.5;
+        const attitudeReady=t.roll_deg!=null&&t.pitch_deg!=null&&Math.max(Math.abs(Number(t.roll_deg)),Math.abs(Number(t.pitch_deg)))<=10;
+        const canTakeoff=canArm&&positionFresh&&flightStateFresh&&attitudeReady&&h.available;
+        const localPositionFresh=t.local_position_age_seconds!=null&&t.local_position_age_seconds<=1;
+        const canLocalTakeoff=t.connected&&t.armed===false&&t.landed_state==='ON_GROUND'&&!o.enabled&&!k.enabled&&!takeoffActive&&!estopLatched&&manualArmModes.includes(modeName)&&t.rc_channel_6_pwm!=null&&!killEngaged&&t.rc_channel_8_pwm!=null&&!rcOffboardSelected&&localPositionFresh&&flightStateFresh&&attitudeReady&&lh.available;
+        if(!takeoffInputInitialized&&h.default_height_m!=null) {
+          $('takeoff-height').min=String(h.min_height_m??1); $('takeoff-height').max=String(h.max_height_m??3); $('takeoff-height').value=Number(h.default_height_m).toFixed(1); takeoffInputInitialized=true;
+        }
+        if(!takeoffBusy) {
+          $('takeoff-start').disabled=!safetyConfirmed||!canTakeoff;
+          $('takeoff-abort').disabled=!nativeTakeoffActive;
+          $('takeoff-height').disabled=nativeTakeoffActive||localTakeoffActive;
+        }
+        const takeoffPhaseNames={IDLE:'未启动',PRECHECK:'地面稳定检查',ARMING:'等待ARM确认',TAKEOFF_REQUESTED:'等待离地',CLIMBING:'爬升中',HOVER_VERIFY:'悬停验证',COMPLETE:'起飞完成',ABORTED:'已取消',FAILED:'失败/已退出',PILOT_TAKEOVER:'飞手已接管'};
+        const takeoffPhase=takeoffPhaseNames[h.phase]||h.phase||'未启动';
+        $('takeoff-badge').textContent=takeoffPhase;
+        $('takeoff-badge').className=`badge ${h.phase==='COMPLETE'?'ok':(['FAILED','ABORTED'].includes(h.phase)?'bad':(nativeTakeoffActive?'warn':''))}`;
+        $('takeoff-progress').style.width=`${Math.max(0,Math.min(100,Number(h.progress_pct)||0))}%`;
+        $('takeoff-state').textContent=`${takeoffPhase}${h.target_height_m!=null?' · 目标 '+number(h.target_height_m,1,' m'):''}${h.current_height_m!=null?' · 当前 '+number(h.current_height_m,2,' m'):''}${h.height_error_m!=null?' · 误差 '+number(h.height_error_m,2,' m'):''} · ${h.last_reason||'等待用户启动'}${h.last_action?' · '+h.last_action:''}${h.error&&h.error!==h.last_reason?' · '+h.error:''}`;
+        $('takeoff-state').className=`command-state ${h.phase==='COMPLETE'?'ok':(['FAILED','ABORTED'].includes(h.phase)?'bad':(nativeTakeoffActive?'warn':''))}`;
+        if(!localTakeoffInputInitialized&&lh.default_height_m!=null) {
+          $('local-takeoff-height').min=String(lh.min_height_m??1); $('local-takeoff-height').max=String(lh.max_height_m??3); $('local-takeoff-height').value=Number(lh.default_height_m).toFixed(1); localTakeoffInputInitialized=true;
+        }
+        if(!localTakeoffBusy) {
+          $('local-takeoff-start').disabled=!safetyConfirmed||!canLocalTakeoff;
+          $('local-takeoff-abort').disabled=!localTakeoffActive;
+          $('local-takeoff-height').disabled=localTakeoffActive||nativeTakeoffActive;
+        }
+        const localPhaseNames={IDLE:'未启动',PRESTREAM:'保持预发送',WAITING_OFFBOARD:'等待实体CH8',ARMING:'等待ARM确认',CLIMBING:'限速爬升',HOVER_VERIFY:'悬停验证',HOLDING:'定点保持中',ABORTED:'已受控退出',FAILED:'失败/已退出',PILOT_TAKEOVER:'飞手已接管'};
+        localPhaseNames.KEYBOARD_CONTROL='已交接键盘控制';
+        const localPhase=localPhaseNames[lh.phase]||lh.phase||'未启动';
+        // Local takeoff has its own profile. Strict keyboard diagnostics must
+        // not silently override the selected fixed-hover gate.
+        const localNav=localTakeoffNavigation(s);
+        const navBlock=localNav.blockReason, navReasons=localNav.blockers;
+        const ratioText=(value,status)=>value==null?`未提供有效数值（${status==='nonfinite'?'NaN/Inf':status||'missing'}）`:number(value,3);
+        const flowSources=Object.entries(t.flow_sources||{}).map(([source,f])=>`${f.selected?'[控制源]':'[仅诊断]'} ${source}：原始质量 ${f.quality_raw}，${number(f.age_seconds,2,' s')}前`).join('\n');
+        $('navigation-evidence').textContent=`估计器：${number(t.estimator_hz,1,' Hz')} · 最近 ${number(t.estimator_age_seconds,2,' s')}前\n速度创新比：${ratioText(t.estimator_velocity_ratio,t.estimator_velocity_ratio_status)}；水平位置创新比：${ratioText(t.estimator_position_ratio,t.estimator_position_ratio_status)}\n光流原始质量：${t.flow_quality??'--'} / 255（不是百分比、不能证明融合）；本地门槛：${t.flow_minimum_quality??'--'}\n控制源：${t.flow_source||'未核实'} · ${number(t.flow_hz,1,' Hz')} · 连续良好 ${number(t.flow_good_seconds,1,' s')} / ${t.flow_good_samples??0} 个不同样本\n${flowSources}\n光流融合：${t.flow_fusion_active==null?'未接入':(t.flow_fusion_active?'启用':'未启用')}；光流X/Y创新比：${number(t.flow_innovation_x_ratio,3)} / ${number(t.flow_innovation_y_ratio,3)}；纯推算：${t.estimator_dead_reckoning==null?'未知':(t.estimator_dead_reckoning?'是':'否')}\n重置计数：${t.estimator_reset_signature==null?'未接入':t.estimator_reset_signature.join('/')}\n独立对地测距：${number(t.laser_height_m,2,' m')} · ${number(t.laser_age_seconds,2,' s')}前 · ${number(t.laser_hz,1,' Hz')}（与光流模块自带距离分开）`;
+        $('navigation-blockers').textContent=navReasons.length?navReasons.map(reason=>'• '+reason).join('\n'):'当前起飞定位证据检查无阻断；仍须满足地面状态、遥控器及安全确认条件。不代表实飞验证通过。';
+        const navWarnings=localNav.warnings;
+        $('navigation-warnings').textContent=(lh.navigation_profile==='px4_fixed_hover'?'基础纯位置起飞/悬停：依赖PX4定位输出，不开放键盘交接。\n':'')+navWarnings.map(reason=>'未验证/提示：'+reason).join('\n');
+        if(navBlock) {
+          $('local-takeoff-start').disabled=true;
+        }
+        $('local-takeoff-badge').textContent=localPhase;
+        $('local-takeoff-badge').className=`badge ${lh.phase==='HOLDING'?'ok':(['FAILED','ABORTED'].includes(lh.phase)?'bad':(localTakeoffActive?'warn':''))}`;
+        $('local-takeoff-progress').style.width=`${Math.max(0,Math.min(100,Number(lh.progress_pct)||0))}%`;
+        $('local-takeoff-state').textContent=`${localPhase}${lh.target_height_m!=null?' · 目标 +'+number(lh.target_height_m,1,' m'):''}${lh.current_height_m!=null?' · 当前 +'+number(lh.current_height_m,2,' m'):''}${lh.commanded_height_m!=null?' · 指令 +'+number(lh.commanded_height_m,2,' m'):''} · ${lh.frequency_hz||10} Hz · 已发 ${lh.packets_sent||0} 包 · ${lh.last_reason||'等待用户启动'}${lh.last_action?' · '+lh.last_action:''}${lh.error&&lh.error!==lh.last_reason?' · '+lh.error:''}`;
+        $('local-takeoff-state').className=`command-state ${lh.phase==='HOLDING'?'ok':(['FAILED','ABORTED'].includes(lh.phase)?'bad':(localTakeoffActive?'warn':''))}`;
+        if(navBlock) {
+          $('local-takeoff-state').textContent+=' · 导航禁止：'+navBlock;
+          $('local-takeoff-state').className='command-state bad';
+        }
+        adoptHandoff(lh);
+        if(lh.handoff?.authorized) {
+          $('keyboard-tx-state').textContent='平滑轨迹真实控制 · '+(handoffToken?'本页键盘':'其他网页');
+          $('keyboard-tx-state').className='sim-action-state bad';
+          $('keyboard-command-state').textContent='同一本地轨迹发送器 · NED位置与速度前馈；松键减速保持，不重新捕获漂移位置';
+        }
         if(!realActionBusy) {
           $('real-arm-toggle').checked=Boolean(t.armed);
-          $('real-arm-toggle').disabled=!f.available||!safetyConfirmed||(t.armed? !canDisarm:!canArm);
+          $('real-arm-toggle').disabled=!f.available||!safetyConfirmed||takeoffActive||(t.armed? !canDisarm:!canArm);
           $('emergency-latch-toggle').checked=estopLatched;
-          $('emergency-latch-toggle').disabled=!f.available||!t.connected;
-          $('real-land').disabled=!safetyConfirmed||t.armed!==true||t.landed_state!=='IN_AIR';
-          $('real-rtl').disabled=!safetyConfirmed||t.armed!==true||t.landed_state!=='IN_AIR';
+          // Engaging the local latch must remain available even when telemetry
+          // is lost. Releasing is fail-closed and follows the backend's single
+          // authoritative eligibility decision.
+          $('emergency-latch-toggle').disabled=estopLatched&&!e.release_eligible;
+          $('real-land').disabled=!safetyConfirmed||t.armed!==true||!['IN_AIR','TAKEOFF'].includes(t.landed_state);
+          $('real-rtl').disabled=estopLatched||!safetyConfirmed||t.armed!==true||t.landed_state!=='IN_AIR';
         }
-        $('emergency-latch-state').textContent=estopLatched?'急停状态：已锁存，网页ARM被禁止。地面已发送正常DISARM；空中则发送PX4 Pause。':'急停状态：未锁存。打开即阻止网页ARM；若地面已ARM则立即发送正常DISARM。';
+        $('emergency-latch-state').textContent=estopLatched?`安全处置：已锁存，网页ARM、电脑TX、Pause和RTL已禁止。动作 ${e.flight_action||'LATCH_ONLY'}${e.action_error?' · '+e.action_error:''}${e.release_eligible?' · 已满足解除条件':' · 暂不可解除：'+(e.release_block_reason||'安全条件未满足')}`:'安全处置：未锁存。打开后地面发送正常DISARM，空中发送LAND；即使遥测失联也可立即锁住本地发送器。';
         $('emergency-latch-state').className=`command-state ${estopLatched?'bad':'ok'}`;
         $('flight-action-badge').textContent=estopLatched?'急停已锁存':(!safetyConfirmed?'等待确认':(t.armed?'已解锁':'允许测试'));
         $('flight-action-badge').className=`badge ${estopLatched?'bad':(!safetyConfirmed?'warn':(t.armed?'warn':'ok'))}`;
         $('flight-action-state').textContent=`模式 ${t.flight_mode||'--'} · ${t.armed?'ARMED':'DISARMED'} · ${t.landed_state||'UNKNOWN'} · 已发真实动作 ${f.commands_sent||0}${f.last_action?' · 最近 '+f.last_action:''}${f.error?' · '+f.error:''}`;
         const ackNames={0:'ACCEPTED',1:'TEMPORARILY_REJECTED',2:'DENIED',3:'UNSUPPORTED',4:'FAILED',5:'IN_PROGRESS',6:'CANCELLED'};
-        const ackRelevant=[192,400].includes(t.last_command_ack_command) && t.last_command_ack_age_seconds!=null;
-        $('command-ack').textContent=ackRelevant?`飞控确认：CMD ${t.last_command_ack_command} · ${ackNames[t.last_command_ack_result]||t.last_command_ack_result} · ${number(t.last_command_ack_age_seconds,1,' s')}前`:'飞控确认：--';
-        $('vision-badge').textContent=v.connected?'视频在线':(v.age_seconds!=null?'视频重连中':'等待视频'); $('vision-badge').className=`badge ${v.connected?'ok':'warn'}`; const fruc=v.interpolation_enabled?` · FRUC ${v.interpolation_ready?'就绪':'未就绪'} ${number(v.interpolation_ms,1,' ms')} · 合成 ${v.synthetic_frames||0}（重复 ${v.repeated_synthetic_frames||0}）${v.interpolation_error?' · '+v.interpolation_error:''}`:''; $('video-meta').textContent=`${v.width||'--'}×${v.height||'--'} · 输入 ${number(v.processing_fps,1,' FPS')} · 输出 ${number(v.output_fps||v.processing_fps,1,' FPS')} · 重连 ${v.reconnect_count||0} 次${fruc}${v.capture_error?' · '+v.capture_error:''}`;
+        const ackRelevant=[20,21,22,192,400].includes(t.last_command_ack_command) && t.last_command_ack_age_seconds!=null;
+        const ackRejected=ackRelevant&&[1,2,3,4,6].includes(Number(t.last_command_ack_result));
+        const ackProgress=ackRelevant&&Number(t.last_command_ack_result)===5;
+        $('command-ack').textContent=ackRelevant?`飞控确认：CMD ${t.last_command_ack_command} · ${ackNames[t.last_command_ack_result]||t.last_command_ack_result} · ${number(t.last_command_ack_age_seconds,1,' s')}前${ackRejected?' · 指令未执行':''}`:'飞控确认：--';
+        $('command-ack').className=`command-state ${ackRejected?'bad':(ackProgress?'warn':'ok')}`;
+        $('vision-badge').textContent=v.connected?'视频在线':(v.age_seconds!=null?'视频重连中':'等待视频'); $('vision-badge').className=`badge ${v.connected?'ok':'warn'}`; const synthLabel=v.display_mode==='latest-real-frame'?'后台合成':'合成'; const fruc=v.interpolation_enabled?` · FRUC ${v.interpolation_ready?'就绪':'未就绪'} ${number(v.interpolation_ms,1,' ms')} · ${synthLabel} ${v.synthetic_frames||0}（重复 ${v.repeated_synthetic_frames||0}）${v.interpolation_error?' · '+v.interpolation_error:''}`:''; const latency=v.display_mode==='latest-real-frame'?` · ${String(v.capture_backend||'opencv').toUpperCase()}/${v.video_decoder||'software'} · 最新帧轮询 · 丢弃 ${v.dropped_capture_frames||0} 帧 · 输入失败 ${v.soft_read_failures||0}`:''; $('video-meta').textContent=`${v.width||'--'}×${v.height||'--'} · 采集 ${number(v.capture_fps,1,' FPS')} · 处理 ${number(v.processing_fps,1,' FPS')} · 输出 ${number(v.output_fps||v.processing_fps,1,' FPS')} · 重连 ${v.reconnect_count||0} 次${latency}${fruc}${v.capture_error?' · '+v.capture_error:''}`;
         $('target-badge').textContent=target.locked?target.source:'未锁定'; $('target-badge').className=`badge ${target.locked?'ok':''}`;
         $('target-id').textContent=target.track_id ?? '--'; $('box-ratio').textContent=number(target.bbox_height_ratio,3); $('center-error').textContent=number(target.center_error_x,3);
         $('preview-forward').textContent=number(p.raw_forward_m_s,2,' m/s'); $('preview-yaw').textContent=number(p.raw_yaw_rate_deg_s,1,' °/s'); $('gate').textContent=p.gate_reason;
@@ -509,7 +789,7 @@
         const errors=[t.error,(!v.connected?v.capture_error:''),v.detector_error,v.tracker_error].filter(Boolean); if(errors.length) $('message').textContent=errors.join(' ｜ ');
       } catch(e) { $('message').textContent=`状态读取失败：${e.message}`; }
     }
-    refresh(); setInterval(refresh,250);
+    reconnectVideo(); refresh(); setInterval(refresh,250);
   </script>
 </body>
 </html>

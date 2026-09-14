@@ -32,4 +32,4 @@ uv run python tools\benchmark_nvof_fruc.py --frames 30 --profile red_barrel
 
 ## 回退
 
-把 `config.toml` 中 `[frame_interpolation].enabled` 改为 `false` 即可回到原始真实帧路径，不影响其他功能。
+把 `config.toml` 中 `[frame_interpolation].enabled` 改为 `false` 即可完全关闭FRUC，不影响其他功能。默认的 `video.low_latency_latest_frame = true` 会优先立即显示最新真实帧：FRUC合成帧仅计入实验指标，不进入网页顺序播放，因为中间帧只有在后一张真实帧到达后才能生成，强行显示会增加端到端延迟。低延迟路径使用FFmpeg/NVDEC输入和浏览器单帧长轮询；`/video.mjpg`仅保留为诊断兼容接口。将低延迟配置改为 `false` 才会恢复5 FPS到10 FPS的顺序插帧对比模式。

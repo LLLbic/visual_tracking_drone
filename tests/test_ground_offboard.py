@@ -98,7 +98,7 @@ class GroundOffboardTests(unittest.TestCase):
         self.assertIn("自动停止", state["last_stop_reason"])
         self.assertEqual(len(self.fake_socket.sent), count_after_stop)
 
-    def test_ready_stream_continues_through_ground_arm_in_offboard(self) -> None:
+    def test_stable_ground_stream_stops_immediately_when_vehicle_arms(self) -> None:
         self.sender.disable()
         self.sender.stop()
         self.sender = GroundOffboardSetpointSender(
@@ -122,12 +122,12 @@ class GroundOffboardTests(unittest.TestCase):
         self.telemetry.rc_channel_6_pwm = 1000
         sleep(0.08)
         state = self.sender.snapshot()
-        self.assertTrue(state["enabled"])
-        self.assertGreater(len(self.fake_socket.sent), count_before_arm)
-        self.telemetry.rc_channel_6_pwm = 2000
+        self.assertFalse(state["enabled"])
+        self.assertIn("DISARMED", state["last_stop_reason"])
+        count_after_stop = len(self.fake_socket.sent)
         sleep(0.08)
-        self.assertFalse(self.sender.snapshot()["enabled"])
-        self.assertIn("Kill Switch", self.sender.snapshot()["last_stop_reason"])
+        self.assertEqual(len(self.fake_socket.sent), count_after_stop)
+        self.assertGreaterEqual(count_after_stop, count_before_arm)
 
     def test_estop_prevents_start(self) -> None:
         self.estop = True
