@@ -55,7 +55,7 @@ const adopt=()=>{context.testState=stateCopy();run('adoptHandoff(testState)');};
   await click('smooth-handoff-authorize');
   await Promise.resolve();await Promise.resolve();
   assert.equal(run('handoffToken'),'permission-token-000000000001');
-  assert.equal(run('keyboardControlEnabled'),false);
+  assert.equal(run('legacyKeyboardControlEnabled'),false);
   assert.ok(calls.some(c=>c.url.endsWith('/authorize')));
   assert.ok(calls.every(c=>c.url.startsWith('/api/local-takeoff/keyboard/')));
 
@@ -101,15 +101,9 @@ const adopt=()=>{context.testState=stateCopy();run('adoptHandoff(testState)');};
   await run('sendHandoffInput()');await click('smooth-handoff-authorize');
   assert.equal(calls.length,takeoffOnlyCount);
   assert.equal(run('handoffRun'),null);assert.equal(run('handoffToken'),null);
-  // Strict keyboard diagnostics must not override the separate fixed-hover gate.
-  context.baselineState={navigation_safety:{block_reason:'strict missing flow',block_reasons:['strict missing flow'],
-    local_takeoff_block_reason:'',local_takeoff_block_reasons:[],local_takeoff_warnings:['flow unverified']}};
-  assert.equal(run('localTakeoffNavigation(baselineState).blockReason'),'');
-  assert.equal(run('localTakeoffNavigation(baselineState).blockers.length'),0);
-  assert.equal(run('localTakeoffNavigation(baselineState).warnings[0]'),'flow unverified');
-  context.baselineState.navigation_safety.local_takeoff_block_reason='position invalid';
-  context.baselineState.navigation_safety.local_takeoff_block_reasons=['position invalid'];
+  // Frontend consumes the coordinator's single, synchronized safety result.
+  context.baselineState={navigation_safety:{block_reason:'position invalid',block_reasons:['position invalid']}};
   assert.equal(run('localTakeoffNavigation(baselineState).blockReason'),'position invalid');
-  assert.equal(run("localTakeoffNavigation({navigation_safety:{block_reason:'old backend denial'}}).blockReason"),'old backend denial');
+  assert.equal(run('localTakeoffNavigation(baselineState).blockers[0]'),'position invalid');
   console.log('Handoff frontend: session, input, revoke, focus, stale-state, isolation and takeoff-only checks passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

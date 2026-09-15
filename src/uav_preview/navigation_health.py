@@ -16,6 +16,18 @@ def estimator_ratio_reason(value: float | None, label: str) -> str:
     return ""
 
 
+def confirmed_velocity_ratio_reason(t: TelemetrySnapshot) -> str:
+    """Apply the receiver's consecutive-sample policy to velocity ratio."""
+
+    value = t.estimator_velocity_ratio
+    reason = estimator_ratio_reason(value, "速度")
+    # Missing/non-finite and invalid negative values still fail closed.  Only
+    # the noisy >1 rejection threshold receives a short debounce window.
+    if value is not None and isfinite(value) and value > 1:
+        return reason if t.estimator_velocity_ratio_confirmed_bad else ""
+    return reason
+
+
 def navigation_block_reasons(t: TelemetrySnapshot, now: float | None = None) -> list[str]:
     now = monotonic() if now is None else now
     reasons = []
@@ -37,7 +49,9 @@ def navigation_block_reasons(t: TelemetrySnapshot, now: float | None = None) -> 
               t.vz_m_s, t.roll_deg, t.pitch_deg, t.yaw_deg, t.laser_height_m)
     if any(v is None or not isfinite(v) for v in values):
         reasons.append("位置、速度、姿态或测距不是有效有限数值")
-    if t.flow_quality is None or not t.flow_minimum_quality <= t.flow_quality <= 255:
+    if not t.flow_quality_authoritative:
+        reasons.append("光流quality字段来源未标定，不能用占位值授权键盘/跟踪导航")
+    elif t.flow_quality is None or not t.flow_minimum_quality <= t.flow_quality <= 255:
         reasons.append(f"光流质量缺失或低于本地门槛 {t.flow_minimum_quality}；非零不代表融合正常")
     if t.flow_error:
         reasons.append(t.flow_error)
@@ -45,7 +59,11 @@ def navigation_block_reasons(t: TelemetrySnapshot, now: float | None = None) -> 
     if flags is None or flags & 15 != 15 or flags & (128 | 1024 | 2048):
         reasons.append("估计器姿态/水平位置/速度无效或处于异常状态")
     for label, ratio in (("速度", t.estimator_velocity_ratio), ("水平位置", t.estimator_position_ratio)):
-        reason = estimator_ratio_reason(ratio, label)
+        reason = (
+            confirmed_velocity_ratio_reason(t)
+            if label == "速度"
+            else estimator_ratio_reason(ratio, label)
+        )
         if reason:
             reasons.append(reason)
     if t.laser_min_m is None or t.laser_max_m is None or not (

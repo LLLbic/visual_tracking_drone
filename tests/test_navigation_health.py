@@ -6,7 +6,7 @@ from uav_preview.motion_plan import KeyboardMotionPlan
 
 class NavigationTests(unittest.TestCase):
     def healthy(self):
-        t = TelemetrySnapshot(flow_quality=245, estimator_flags=15,
+        t = TelemetrySnapshot(flow_quality=245, flow_quality_authoritative=True, estimator_flags=15,
             estimator_velocity_ratio=0.1, estimator_position_ratio=0.1,
             laser_height_m=1.5, laser_min_m=0.1, laser_max_m=3.0,
             rc_channel_6_pwm=1000, rc_channel_8_pwm=2000)
@@ -22,12 +22,22 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(navigation_block_reason(TelemetrySnapshot(), 100))
         self.assertEqual(navigation_block_reason(self.healthy(), 100), '')
         for field, value in [('flow_quality',0),('estimator_flags',0),('estimator_flags',143),
-                             ('estimator_velocity_ratio',1.01),('estimator_position_ratio',float('nan')),
+                             ('flow_quality_authoritative',False),
+                             ('estimator_position_ratio',float('nan')),
                              ('last_rc_channels_monotonic',98),('last_local_position_monotonic',101),
                              ('laser_height_m',5),('navigation_fault','reset'),('vx_m_s',float('inf'))]:
             with self.subTest(field=field, value=value):
                 t=self.healthy(); setattr(t,field,value)
                 self.assertTrue(navigation_block_reason(t,100))
+
+    def test_velocity_ratio_needs_confirmed_consecutive_samples(self):
+        t = self.healthy()
+        t.estimator_velocity_ratio = 1.01
+        t.estimator_velocity_ratio_bad_samples = 1
+        self.assertEqual(navigation_block_reason(t, 100), '')
+        t.estimator_velocity_ratio_bad_samples = 2
+        t.estimator_velocity_ratio_confirmed_bad = True
+        self.assertIn('> 1', navigation_block_reason(t, 100))
 
     def test_stationary_capture_and_hold_does_not_follow_drift(self):
         t=self.healthy(); p=KeyboardMotionPlan()

@@ -32,7 +32,8 @@ def healthy(now=100.0):
         connected=True, armed=True, flight_mode="OFFBOARD", landed_state="IN_AIR",
         local_x_m=4.0,local_y_m=-2.0,local_z_m=-1.25,
         vx_m_s=0.0,vy_m_s=0.0,vz_m_s=0.0,roll_deg=0.0,pitch_deg=0.0,yaw_deg=0.0,
-        flow_quality=240,estimator_flags=15|32,estimator_velocity_ratio=0.1,estimator_position_ratio=0.1,
+        flow_quality=240,flow_quality_authoritative=True,
+        estimator_flags=15|32,estimator_velocity_ratio=0.1,estimator_position_ratio=0.1,
         flow_source='1/1/OPTICAL_FLOW_RAD/0',flow_good_since_monotonic=now-10.,flow_good_samples=100,
         laser_height_m=1.5,laser_min_m=0.1,laser_max_m=5.0,
         rc_channel_6_pwm=1000,rc_channel_8_pwm=2000,
@@ -95,7 +96,7 @@ class HandoffTests(unittest.TestCase):
             "flow_good_since_monotonic":[None,99.,101.],"flow_good_samples":[0,14],
             "flow_source":[''],
             "local_position_sample_id":[None,True,-1],"last_distinct_position_monotonic":[None,99.0],
-            "estimator_velocity_ratio":[None,1.01],"estimator_position_ratio":[float('nan')],
+            "estimator_velocity_ratio":[None],"estimator_position_ratio":[float('nan')],
             "local_x_m":[None,float('inf')],"vx_m_s":[float('nan')],
         }
         for field,values in cases.items():
@@ -103,6 +104,13 @@ class HandoffTests(unittest.TestCase):
                 with self.subTest(field=field,value=value):
                     t=replace(self.t,**{field:value})
                     self.assertTrue(detailed_health_reason(t,self.now))
+        t = replace(
+            self.t,
+            estimator_velocity_ratio=1.01,
+            estimator_velocity_ratio_bad_samples=2,
+            estimator_velocity_ratio_confirmed_bad=True,
+        )
+        self.assertTrue(detailed_health_reason(t,self.now))
         self.assertEqual(detailed_health_reason(self.t,self.now),'')
 
     def test_position_speed_tilt_and_actual_mode_must_remain_stable(self):

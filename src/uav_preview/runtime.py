@@ -11,8 +11,7 @@ from .flight_actions import ExplicitFlightActionSender
 from .keyboard_control import KeyboardOffboardSetpointSender
 from .local_takeoff import LocalOffboardTakeoffCoordinator
 from .mavlink_router import LocalMavlinkRouter
-from .navigation_health import navigation_block_reason, navigation_block_reasons
-from .smooth_handoff import handoff_evidence_reasons
+from .navigation_health import navigation_block_reason
 from .offboard_test import GroundOffboardSetpointSender
 from .position_stream import PositionStreamRateRequester
 from .safety import CONTROL_TRANSMISSION_COMPILED, SafetyGate
@@ -433,24 +432,12 @@ class Runtime:
             gate_reason=decision.reason,
         )
         navigation_now = monotonic()
-        navigation_reasons = navigation_block_reasons(telemetry, navigation_now)
         local_navigation = self.local_takeoff.navigation_status(telemetry, navigation_now)
         takeoff_reasons = local_navigation["block_reasons"]
-        handoff_enabled = bool(local_takeoff.get("keyboard_handoff_enabled", False))
         return {
             "navigation_safety": {
-                "block_reason": next(iter(navigation_reasons), ""),
-                "block_reasons": navigation_reasons,
-                "handoff_block_reasons": handoff_evidence_reasons(telemetry, navigation_now) if handoff_enabled else [],
-                "diagnostics_version": "px4-fixed-hover-v5",
-                "local_takeoff_profile": local_navigation["profile"],
-                "local_takeoff_warnings": local_navigation["warnings"],
-                "local_takeoff_block_reason": next(iter(takeoff_reasons), ""),
-                "local_takeoff_block_reasons": takeoff_reasons,
-                "automatic_handoff": False,
-                "manual_smooth_handoff": handoff_enabled,
-                "flight_validated": False,
-                "fault_latched": bool(telemetry.navigation_fault),
+                "block_reason": next(iter(takeoff_reasons), ""),
+                "block_reasons": takeoff_reasons,
             },
             "build": {
                 "passive_only": False,

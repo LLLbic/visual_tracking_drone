@@ -1,4 +1,4 @@
-"""PX4-estimate-backed, position-only takeoff/hold safety (no keyboard control).
+"""PX4-estimate-backed safety shared by fixed hover and position-only keyboard motion.
 
 Standard telemetry is not a substitute for detailed EKF fusion/reset evidence.
 This limited profile explicitly reports those observability gaps. It never
@@ -6,7 +6,7 @@ invents fusion flags or changes PX4's arming checks/failsafe parameters.
 """
 from math import isfinite, sqrt
 
-from .navigation_health import estimator_ratio_reason
+from .navigation_health import confirmed_velocity_ratio_reason, estimator_ratio_reason
 from .types import TelemetrySnapshot
 
 
@@ -25,7 +25,10 @@ def fixed_hover_health(t: TelemetrySnapshot, now: float):
         ("实体RC", t.last_rc_channels_monotonic, 1.0),
         ("姿态", t.last_attitude_monotonic, .5),
         ("本地位置", t.last_local_position_monotonic, 1.0),
-        ("落地状态", t.last_extended_state_monotonic, 1.5),
+        # This radio currently delivers EXTENDED_SYS_STATE at about 0.6 Hz
+        # even after a 2 Hz interval request.  Allow one normal 1.67 s cycle
+        # plus bounded jitter without weakening position/attitude/RC checks.
+        ("落地状态", t.last_extended_state_monotonic, 2.5),
         ("估计器状态", t.last_estimator_monotonic, 1.5),
     ):
         if not fresh(stamp, now, limit):
@@ -42,9 +45,18 @@ def fixed_hover_health(t: TelemetrySnapshot, now: float):
     if (type(flags) is not int or flags & 15 != 15 or not flags & (32 | 64)
             or flags & (128 | 1024 | 2048)):
         blockers.append("飞控未确认姿态、水平位置/速度或垂直定位有效，或报告估计器异常")
-    velocity_reason = estimator_ratio_reason(t.estimator_velocity_ratio, "速度")
+    velocity_reason = confirmed_velocity_ratio_reason(t)
     if velocity_reason:
         blockers.append(velocity_reason)
+    elif (
+        t.estimator_velocity_ratio is not None
+        and isfinite(t.estimator_velocity_ratio)
+        and t.estimator_velocity_ratio > 1
+    ):
+        warnings.append(
+            "估计器速度创新比短时超限，等待连续样本确认"
+            f"（{t.estimator_velocity_ratio_bad_samples}/2）"
+        )
     if t.estimator_position_ratio is not None:
         reason = estimator_ratio_reason(t.estimator_position_ratio, "水平位置")
         if reason:
@@ -65,8 +77,11 @@ def fixed_hover_health(t: TelemetrySnapshot, now: float):
     # An actual observed bad measurement must never be hidden by this profile.
     if t.flow_error:
         blockers.append(t.flow_error)
-    if t.flow_source and t.flow_quality is not None and not t.flow_minimum_quality <= t.flow_quality <= 255:
+    if (t.flow_quality_authoritative and t.flow_source and t.flow_quality is not None
+            and not t.flow_minimum_quality <= t.flow_quality <= 255):
         blockers.append("已观测到指定来源光流质量低于门槛，禁止基础起飞控制")
+    if t.flow_source and not t.flow_quality_authoritative:
+        warnings.append("当前链路光流quality字段未标定/可能为占位值，仅作诊断显示，不参与基础起飞或悬停判定")
     if not t.flow_source or not fresh(t.last_flow_monotonic, now, 1.5):
         warnings.append("未收到新鲜的指定来源原始光流；光流质量未验证，不能据此授权跟踪或交接")
     if t.flow_fusion_active is False or t.flow_innovation_rejected is True or t.estimator_dead_reckoning is True:

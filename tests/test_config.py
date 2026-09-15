@@ -11,6 +11,17 @@ from uav_preview.config import load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_flow_quality_is_diagnostic_until_explicitly_trusted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "flow.toml"
+            path.write_text("", encoding="utf-8")
+            self.assertFalse(load_config(path).telemetry.flow_quality_authoritative)
+            path.write_text("[telemetry]\nflow_quality_authoritative = true\n", encoding="utf-8")
+            self.assertTrue(load_config(path).telemetry.flow_quality_authoritative)
+            path.write_text("[telemetry]\nflow_quality_authoritative = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                load_config(path)
+
     def test_local_takeoff_handoff_is_explicit_boolean_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "handoff.toml"
@@ -22,6 +33,33 @@ class ConfigTests(unittest.TestCase):
                 path.write_text(f"[local_offboard_takeoff]\nkeyboard_handoff_enabled = {value}\n", encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "must be a boolean"):
                     load_config(path)
+
+    def test_position_keyboard_profile_requires_explicit_handoff_pairing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "position-keyboard.toml"
+            path.write_text(
+                '[keyboard_control]\navailable=false\n'
+                '[local_offboard_takeoff]\nnavigation_profile="px4_position_keyboard"\n'
+                'keyboard_handoff_enabled=true\n', encoding="utf-8",
+            )
+            config = load_config(path)
+            self.assertEqual(config.local_offboard_takeoff.navigation_profile, "px4_position_keyboard")
+            self.assertTrue(config.local_offboard_takeoff.keyboard_handoff_enabled)
+            path.write_text(
+                '[keyboard_control]\navailable=false\n'
+                '[local_offboard_takeoff]\nnavigation_profile="px4_position_keyboard"\n'
+                'keyboard_handoff_enabled=false\n', encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "requires keyboard"):
+                load_config(path)
+
+            path.write_text(
+                '[keyboard_control]\navailable=true\n'
+                '[local_offboard_takeoff]\nnavigation_profile="px4_position_keyboard"\n'
+                'keyboard_handoff_enabled=true\n', encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "legacy BODY_NED"):
+                load_config(path)
 
     def test_position_stream_defaults_to_five_hz_without_parameter_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -174,6 +212,13 @@ class ConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "frequency_hz"):
+                load_config(path)
+
+            path.write_text(
+                "[local_offboard_takeoff]\nmax_climb_setpoint_lead_m = 0.8\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "max_climb_setpoint_lead_m"):
                 load_config(path)
 
     def test_local_takeoff_defaults_to_current_pose_relative_height(self) -> None:

@@ -10,11 +10,12 @@ from typing import Any, Callable
 from .config import GroundOffboardTestConfig, LocalOffboardTakeoffConfig
 from .flight_actions import ExplicitFlightActionSender
 from .types import TelemetrySnapshot
-from .smooth_handoff import SmoothHandoff, HandoffFault
+from .smooth_handoff import SmoothHandoff, HandoffFault, HandoffLimits
 from .fixed_hover import FixedHoverFrameMonitor, fixed_hover_health
 
 
 _MANUAL_MODES = {"MANUAL", "STABILIZED", "ALTCTL", "POSCTL", "POSITION"}
+_LAND_MODES = {"LAND", "AUTO_LAND", "AUTO.LAND", "DESCEND", "AUTO_DESCEND"}
 _ACK_ACCEPTED = {0, 5}
 _ACK_REJECTED = {1, 2, 3, 4, 6}
 
@@ -52,6 +53,7 @@ class LocalTakeoffState:
     started_monotonic: float | None = None
     phase_started_monotonic: float | None = None
     arm_sent_monotonic: float | None = None
+    land_sent_monotonic: float | None = None
     climb_started_monotonic: float | None = None
     hover_stable_since_monotonic: float | None = None
     arm_acknowledged: bool = False
@@ -69,6 +71,7 @@ class LocalTakeoffState:
             "started_monotonic",
             "phase_started_monotonic",
             "arm_sent_monotonic",
+            "land_sent_monotonic",
             "climb_started_monotonic",
             "hover_stable_since_monotonic",
             "last_send_monotonic",
@@ -112,11 +115,15 @@ class LocalOffboardTakeoffCoordinator:
         # Fixed for this service instance, never a live in-flight UI switch.
         self._keyboard_handoff_enabled = config.keyboard_handoff_enabled is True
         self._navigation_profile = config.navigation_profile
-        if self._navigation_profile not in {"detailed", "px4_fixed_hover"}:
+        if self._navigation_profile not in {"detailed", "px4_fixed_hover", "px4_position_keyboard"}:
             raise ValueError("未知的本地起飞定位配置")
         self._fixed_hover = self._navigation_profile == "px4_fixed_hover"
+        self._position_keyboard = self._navigation_profile == "px4_position_keyboard"
+        self._position_only = self._fixed_hover or self._position_keyboard
         if self._fixed_hover and self._keyboard_handoff_enabled:
             raise ValueError("px4_fixed_hover禁止键盘交接")
+        if self._position_keyboard and not self._keyboard_handoff_enabled:
+            raise ValueError("px4_position_keyboard必须显式启用键盘交接")
         self.link = link
         self._telemetry_snapshot = telemetry_snapshot
         self._flight_actions = flight_actions
@@ -172,23 +179,22 @@ class LocalOffboardTakeoffCoordinator:
             result["keyboard_handoff_enabled"] = self._keyboard_handoff_enabled
             result["control_scope"] = "TAKEOFF_HOVER_KEYBOARD" if self._keyboard_handoff_enabled else "TAKEOFF_HOLD_ONLY"
             result["navigation_profile"] = self._navigation_profile
-            result["setpoint_type"] = "POSITION_ONLY" if self._fixed_hover else "POSITION_VELOCITY_FF"
+            result["setpoint_type"] = "POSITION_ONLY" if self._position_only else "POSITION_VELOCITY_FF"
+            result["max_climb_setpoint_lead_m"] = self.config.max_climb_setpoint_lead_m
             result["handoff"] = (self._handoff.snapshot(self._clock())
                                  if self._keyboard_handoff_enabled and self._handoff is not None else None)
             return result
 
     def navigation_status(self, telemetry: TelemetrySnapshot, now: float) -> dict[str, Any]:
-        if self._fixed_hover:
-            reasons, warnings = fixed_hover_health(telemetry, now)
+        if self._position_only:
+            reasons, _warnings = fixed_hover_health(telemetry, now)
         else:
             from .navigation_health import navigation_block_reasons
             from .smooth_handoff import position_control_evidence_reasons
             reasons = list(dict.fromkeys([
                 *navigation_block_reasons(telemetry, now), *position_control_evidence_reasons(telemetry, now)
             ]))
-            warnings = []
-        return {"profile": self._navigation_profile, "block_reason": next(iter(reasons), ""),
-                "block_reasons": reasons, "warnings": warnings}
+        return {"block_reason": next(iter(reasons), ""), "block_reasons": reasons}
 
     def report_keyboard(self, run_id, client_id, sequence, axes, foreground, confirmed, keys_released, token=None):
         with self._lock:
@@ -259,11 +265,37 @@ class LocalOffboardTakeoffCoordinator:
                 ),
             )
             self._handoff_stable_since = None
-            self._frame_monitor = FixedHoverFrameMonitor(telemetry) if self._fixed_hover else None
+            self._frame_monitor = FixedHoverFrameMonitor(telemetry) if self._position_only else None
+            handoff_limits = HandoffLimits(
+                stable_seconds=3.0,
+                max_tick_gap=0.25,
+                max_position_sample_gap=min(1.0, self.config.position_stale_seconds),
+                input_timeout=0.4,
+                horizontal_error=0.15,
+                vertical_error=0.15,
+                horizontal_stable_speed=0.08,
+                vertical_stable_speed=0.10,
+                max_speed=0.15,
+                max_vertical_speed=0.10,
+                max_yaw_rate=8.0,
+                acceleration=0.25,
+                vertical_acceleration=0.20,
+                yaw_acceleration=15.0,
+                lead_soft=0.15,
+                lead_hard=0.30,
+                vertical_lead_soft=0.12,
+                vertical_lead_hard=0.25,
+                yaw_lead_soft_deg=12.0,
+                yaw_lead_hard_deg=25.0,
+            ) if self._position_keyboard else None
             self._handoff = SmoothHandoff(
                 (float(telemetry.local_x_m),float(telemetry.local_y_m),float(telemetry.local_z_m)-height,radians(float(telemetry.yaw_deg))),
-                float(telemetry.local_z_m),(float(telemetry.local_x_m),float(telemetry.local_y_m)),self.config.max_horizontal_drift_m,
+                float(telemetry.local_z_m),(float(telemetry.local_x_m),float(telemetry.local_y_m)),
+                min(0.5, self.config.max_horizontal_drift_m) if self._position_keyboard else self.config.max_horizontal_drift_m,
+                limits=handoff_limits,
                 frame_signature=telemetry.estimator_reset_signature,
+                health_check=self._position_keyboard_health_reason if self._position_keyboard else None,
+                require_reset_evidence=not self._position_keyboard,
             )
         self._wake.set()
         return self.snapshot()
@@ -308,6 +340,9 @@ class LocalOffboardTakeoffCoordinator:
                     now,
                 )
                 return
+            if self._state.phase == "LANDING":
+                self._tick_landing(telemetry, now)
+                return
             # Pilot mode changes win even when another data stream is stale.
             if self._state.phase in {"ARMING", "CLIMBING", "HOVER_VERIFY", "HOLDING"} and self._pilot_switched_out(telemetry):
                 self._pilot_takeover("实体CH8或模式已退出Offboard，停止电脑控制", now)
@@ -316,7 +351,11 @@ class LocalOffboardTakeoffCoordinator:
                 self._fail_without_action("MAVLink路由离线，停止本地设定值；请立即用实体遥控器接管", now)
                 return
             if not self._telemetry_fresh(telemetry, now):
-                self._fail_without_action("遥测或本地位置过期，停止设定值；请立即用实体遥控器接管", now)
+                self._exit_for_anomaly(
+                    "遥测或本地位置过期，停止设定值并进入受控退出",
+                    telemetry,
+                    now,
+                )
                 return
             if self._other_sender_enabled():
                 self._safe_terminal("FAILED", "检测到另一个电脑设定值发送器，已停止本地起飞", telemetry)
@@ -325,23 +364,31 @@ class LocalOffboardTakeoffCoordinator:
             # No catch-up ramp after a blocked thread or suspended computer.
             last = self._state.last_send_monotonic
             if last is not None and not 0 <= now-last <= 0.25:
-                self._fail_without_action("设定值循环中断超过250毫秒；任务失效，禁止补发或自动恢复", now)
+                self._exit_for_anomaly(
+                    "设定值循环中断超过250毫秒；任务失效，禁止补发或自动恢复",
+                    telemetry,
+                    now,
+                )
                 return
 
             phase = self._state.phase
             health_reason = self._navigation_guard() or self.navigation_status(telemetry, now)["block_reason"]
             if health_reason:
-                self._fail_without_action(health_reason + "；停止电脑设定值，请实体遥控器接管", now)
+                self._exit_for_anomaly(
+                    health_reason + "；停止电脑设定值",
+                    telemetry,
+                    now,
+                )
                 return
             try:
-                if self._fixed_hover:
+                if self._position_only:
                     if self._frame_monitor is None:
                         raise ValueError("基础悬停坐标监视器未初始化")
                     self._frame_monitor.check(telemetry, now)
                 else:
                     self._handoff.check_frame(telemetry,now)
             except (HandoffFault, ValueError) as exc:
-                self._fail_without_action(str(exc)+"；请实体遥控器接管",now)
+                self._exit_for_anomaly(str(exc)+"；旧目标立即作废",telemetry,now)
                 return
             if phase in {"PRESTREAM", "WAITING_OFFBOARD"}:
                 self._tick_before_arm(telemetry, now)
@@ -365,13 +412,17 @@ class LocalOffboardTakeoffCoordinator:
             except Exception as exc:
                 with self._lock:
                     if self._state.active:
-                        self._state.active = False
-                        self._state.phase = "FAILED"
-                        self._state.phase_started_monotonic = self._clock()
-                        self._state.last_reason = f"本地起飞状态机内部错误：{exc}"
-                        self._state.error = self._state.last_reason
-                        if self._handoff is not None:
-                            self._handoff.cancel(self._state.last_reason)
+                        now = self._clock()
+                        reason = f"本地起飞状态机内部错误：{exc}"
+                        try:
+                            self._exit_for_anomaly(
+                                reason, self._telemetry_snapshot(), now
+                            )
+                        except Exception:
+                            self._fail_without_action(
+                                reason + "；无法确认受控LAND，必须由实体遥控器接管",
+                                now,
+                            )
             self._wake.wait(timeout=max(0.0, period - (self._clock() - started)))
             self._wake.clear()
 
@@ -379,7 +430,7 @@ class LocalOffboardTakeoffCoordinator:
         if telemetry.armed is not False or telemetry.landed_state != "ON_GROUND":
             self._safe_terminal("FAILED", "预发送阶段不再满足DISARMED + ON_GROUND", telemetry)
             return
-        if self._fixed_hover and (self._horizontal_drift(telemetry) > .15
+        if self._position_only and (self._horizontal_drift(telemetry) > .15
                 or hypot(telemetry.vx_m_s, telemetry.vy_m_s) > .15 or abs(telemetry.vz_m_s) > .20):
             self._fail_without_action("地面位置/速度未稳定，取消预发送；不发送ARM", now)
             return
@@ -489,7 +540,9 @@ class LocalOffboardTakeoffCoordinator:
                 phase = self._handoff.reference.phase if self._handoff.reference else "HOLDING"
                 self._state.last_reason = self._handoff.reason or "同一轨迹控制器运行："+phase
             except HandoffFault as exc:
-                self._fail_without_action(str(exc)+"；旧坐标目标已作废，请飞手接管",now)
+                self._exit_for_anomaly(
+                    str(exc)+"；旧坐标目标已作废", telemetry, now
+                )
             return
         if height > self._state.target_height_m + 0.5:
             self._safe_terminal("FAILED", "高度超调超过0.5米，已请求LAND", telemetry)
@@ -497,10 +550,19 @@ class LocalOffboardTakeoffCoordinator:
 
         if self._state.phase != "HOLDING":
             assert self._state.climb_started_monotonic is not None
-            command_height = min(
+            scheduled_height = min(
                 self._state.target_height_m,
                 max(0.0, now - self._state.climb_started_monotonic)
                 * self.config.climb_rate_m_s,
+            )
+            # Time alone must never pull the position controller far above an
+            # aircraft that is climbing slowly or has not left the ground.
+            # The command remains above the measured height, but its lead is
+            # bounded on every control tick.
+            command_height = min(
+                scheduled_height,
+                self._state.target_height_m,
+                height + self.config.max_climb_setpoint_lead_m,
             )
             if now - self._state.climb_started_monotonic > self.config.climb_timeout_seconds:
                 self._safe_terminal("FAILED", "达到目标高度超时，已请求LAND", telemetry)
@@ -589,6 +651,12 @@ class LocalOffboardTakeoffCoordinator:
             return "缺少有效的本地位置或航向数据"
         return ""
 
+    @staticmethod
+    def _position_keyboard_health_reason(telemetry: TelemetrySnapshot, now: float) -> str:
+        """Use PX4 estimate validity; raw flow quality may be an adapter placeholder."""
+        reasons, _warnings = fixed_hover_health(telemetry, now)
+        return next(iter(reasons), "")
+
     def _telemetry_fresh(self, telemetry: TelemetrySnapshot, now: float) -> bool:
         # Fresh timestamps alone do not make NaN/Inf or missing data usable.
         values = (
@@ -609,11 +677,14 @@ class LocalOffboardTakeoffCoordinator:
             and age(telemetry.last_heartbeat_monotonic) is not None
             and age(telemetry.last_heartbeat_monotonic) <= self._stale_after_seconds
             and age(telemetry.last_attitude_monotonic) is not None
-            and age(telemetry.last_attitude_monotonic) <= self._stale_after_seconds
+            and age(telemetry.last_attitude_monotonic) <= 0.5
             and age(telemetry.last_extended_state_monotonic) is not None
-            and age(telemetry.last_extended_state_monotonic) <= self._stale_after_seconds
+            # The D7 radio exposes EXTENDED_SYS_STATE at roughly 0.6 Hz.
+            # This is deliberately stream-specific: position, attitude and RC
+            # retain their faster fail-closed deadlines below.
+            and age(telemetry.last_extended_state_monotonic) <= 2.5
             and age(telemetry.last_rc_channels_monotonic) is not None
-            and age(telemetry.last_rc_channels_monotonic) <= self._stale_after_seconds
+            and age(telemetry.last_rc_channels_monotonic) <= 1.0
             and age(telemetry.last_local_position_monotonic) is not None
             and age(telemetry.last_local_position_monotonic) <= self.config.position_stale_seconds
         )
@@ -651,8 +722,11 @@ class LocalOffboardTakeoffCoordinator:
                 telemetry.system_id or self.link.target_system,
                 telemetry.component_id or self.link.target_component,
                 self._mavlink2.MAV_FRAME_LOCAL_NED,
-                LOCAL_POSITION_TYPE_MASK if self._fixed_hover else LOCAL_TRAJECTORY_TYPE_MASK,
-                goal[0], goal[1], goal[2], goal[4], goal[5], goal[6],
+                LOCAL_POSITION_TYPE_MASK if self._position_only else LOCAL_TRAJECTORY_TYPE_MASK,
+                goal[0], goal[1], goal[2],
+                0.0 if self._position_only else goal[4],
+                0.0 if self._position_only else goal[5],
+                0.0 if self._position_only else goal[6],
                 0.0,
                 0.0,
                 0.0,
@@ -666,13 +740,9 @@ class LocalOffboardTakeoffCoordinator:
             # pack(), unlike MAVLink.send(), does not advance the sequence.
             self._mav.seq = (self._mav.seq + 1) & 255
         except Exception as exc:
-            self._state.active = False
-            self._state.phase = "FAILED"
-            self._state.phase_started_monotonic = now
-            self._state.last_reason = f"本地位置设定值发送失败：{exc}"
-            self._state.error = self._state.last_reason
-            if self._handoff is not None:
-                self._handoff.cancel(self._state.last_reason)
+            self._exit_for_anomaly(
+                f"本地位置设定值发送失败：{exc}", telemetry, now
+            )
             return False
         self._state.commanded_height_m = commanded_height_m
         self._state.packets_sent += 1
@@ -746,6 +816,113 @@ class LocalOffboardTakeoffCoordinator:
         self._state.last_reason = reason
         self._state.error = ""
 
+    def _landing_command_possible(
+        self, telemetry: TelemetrySnapshot, now: float
+    ) -> bool:
+        """Whether a one-shot LAND can still be addressed and monitored."""
+
+        def fresh(stamp: float | None, limit: float) -> bool:
+            return bool(
+                stamp is not None
+                and isfinite(stamp)
+                and 0.0 <= now - stamp <= limit
+            )
+
+        age = telemetry.age_seconds(now)
+        return bool(
+            self._router_ready()
+            and telemetry.connected
+            and telemetry.system_id is not None
+            and telemetry.component_id == 1
+            and telemetry.armed is True
+            and telemetry.landed_state in {"IN_AIR", "TAKEOFF", "LANDING"}
+            and age is not None
+            and age <= self._stale_after_seconds
+            and fresh(telemetry.last_heartbeat_monotonic, self._stale_after_seconds)
+            and fresh(telemetry.last_extended_state_monotonic, 2.5)
+        )
+
+    def _exit_for_anomaly(
+        self, reason: str, telemetry: TelemetrySnapshot, now: float
+    ) -> None:
+        """Invalidate the old trajectory, then prefer an explicit PX4 LAND."""
+
+        if self._landing_command_possible(telemetry, now):
+            self._safe_terminal("FAILED", reason, telemetry)
+            return
+        self._fail_without_action(
+            reason
+            + "；当前链路/飞控状态不足以可靠发送LAND，请立即用实体遥控器接管",
+            now,
+        )
+
+    def _tick_landing(self, telemetry: TelemetrySnapshot, now: float) -> None:
+        """Monitor a one-shot controlled LAND without sending more setpoints.
+
+        Channel 8 leaving Offboard or the physical kill switch always stops the
+        computer monitor immediately.  LAND is never reasserted over a pilot.
+        """
+
+        if not self._physical_offboard_selected(telemetry):
+            self._pilot_takeover(
+                "实体CH8已退出Offboard；电脑不再维持LAND，飞手已立即接管",
+                now,
+            )
+            return
+        if telemetry.armed is False:
+            if telemetry.landed_state == "ON_GROUND":
+                self._state.active = False
+                self._state.phase = "LANDED"
+                self._state.phase_started_monotonic = now
+                self._state.last_reason = "受控LAND完成，飞控已落地并DISARM"
+                self._state.error = ""
+            else:
+                self._fail_without_action(
+                    "受控LAND期间飞控已DISARM但未确认落地，请飞手立即接管",
+                    now,
+                )
+            return
+
+        if telemetry.landed_state == "ON_GROUND":
+            try:
+                if self._state.last_action != "已发送正常DISARM":
+                    self._flight_actions.safety_disarm_on_ground()
+                    self._state.last_action = "已发送正常DISARM"
+                self._state.last_reason = "受控LAND已落地，等待飞控确认DISARM；实体CH8仍可随时覆盖"
+            except ValueError as exc:
+                self._fail_without_action(
+                    f"已确认落地但正常DISARM发送失败：{exc}；请用实体遥控器处置",
+                    now,
+                )
+            return
+
+        if not self._landing_command_possible(telemetry, now):
+            self._fail_without_action(
+                "受控LAND监视所需的心跳/落地状态/路由已丢失；LAND不再重发，请飞手立即接管",
+                now,
+            )
+            return
+
+        sent = self._state.land_sent_monotonic
+        ack = None if sent is None else self._ack_for(21, sent, telemetry)
+        if ack in _ACK_REJECTED:
+            self._fail_without_action(
+                f"飞控拒绝受控LAND（MAV_RESULT={ack}），请立即用实体遥控器接管",
+                now,
+            )
+            return
+        mode = self._mode(telemetry)
+        if mode in _LAND_MODES or telemetry.landed_state == "LANDING":
+            self._state.last_reason = "受控LAND已生效；停止全部电脑设定值，等待落地，实体CH8可随时覆盖"
+            return
+        if sent is not None and now - sent > 2.0:
+            self._fail_without_action(
+                f"受控LAND在2秒内未生效（当前模式{mode}）；不重复抢占，请飞手立即接管",
+                now,
+            )
+            return
+        self._state.last_reason = "已发送受控LAND，等待飞控确认；实体CH8可随时覆盖"
+
     def _fail_without_action(self, reason: str, now: float) -> None:
         if self._handoff is not None:
             self._handoff.cancel(reason)
@@ -762,6 +939,8 @@ class LocalOffboardTakeoffCoordinator:
             self._handoff.cancel(reason)
         action = ""
         action_error = ""
+        now = self._clock()
+        keep_monitoring_land = False
         try:
             if telemetry.landed_state == "ON_GROUND" and (
                 telemetry.armed is True or self._state.arm_sent_monotonic is not None
@@ -771,11 +950,20 @@ class LocalOffboardTakeoffCoordinator:
             elif telemetry.armed is True and telemetry.landed_state in {"IN_AIR", "TAKEOFF"}:
                 self._flight_actions.land()
                 action = "已发送LAND"
+                keep_monitoring_land = True
+                self._state.land_sent_monotonic = now
+            elif telemetry.armed is True and telemetry.landed_state == "LANDING":
+                action = "飞控已处于LANDING"
+                keep_monitoring_land = True
         except ValueError as exc:
             action_error = str(exc)
-        self._state.active = False
-        self._state.phase = phase
-        self._state.phase_started_monotonic = self._clock()
+        self._state.active = keep_monitoring_land and not action_error
+        self._state.phase = "LANDING" if self._state.active else phase
+        self._state.phase_started_monotonic = now
         self._state.last_action = action or self._state.last_action
-        self._state.last_reason = reason + (f"；{action}" if action else "")
-        self._state.error = action_error or (reason if phase == "FAILED" else "")
+        if self._state.active:
+            self._state.last_reason = reason + f"；{action}并停止连续设定值"
+            self._state.error = reason if phase == "FAILED" else ""
+        else:
+            self._state.last_reason = reason + (f"；{action}" if action else "")
+            self._state.error = action_error or (reason if phase == "FAILED" else "")

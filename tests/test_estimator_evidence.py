@@ -14,10 +14,10 @@ from uav_preview.types import TelemetrySnapshot
 
 
 class EstimatorEvidenceTests(unittest.TestCase):
-    def message(self, sample_id=1000000, ratio=0.1):
+    def message(self, sample_id=1000000, ratio=0.1, velocity_ratio=0.1):
         return SimpleNamespace(get_type=lambda: 'ESTIMATOR_STATUS',
             get_srcSystem=lambda: 1, get_srcComponent=lambda: 1,
-            time_usec=sample_id, flags=367, vel_ratio=0.1, pos_horiz_ratio=ratio)
+            time_usec=sample_id, flags=367, vel_ratio=velocity_ratio, pos_horiz_ratio=ratio)
 
     def receiver(self):
         return PassiveMavlinkReceiver(TelemetryConfig())
@@ -76,6 +76,54 @@ class EstimatorEvidenceTests(unittest.TestCase):
         self.assertIn('> 1', r.snapshot().navigation_fault)
         self.accept(r, self.message(1400000,ratio=.1),100.4)
         self.assertIn('> 1', r.snapshot().navigation_fault)  # actual fault remains latched
+
+    def test_velocity_ratio_single_packet_never_latches(self):
+        r = self.receiver()
+        r._snapshot.armed = True
+        self.accept(r, self.message(1000000, velocity_ratio=1.50), 100.0)
+        t = r.snapshot()
+        self.assertEqual(t.navigation_fault, '')
+        self.assertEqual(t.estimator_velocity_ratio_bad_samples, 1)
+        self.assertFalse(t.estimator_velocity_ratio_confirmed_bad)
+
+    def test_velocity_ratio_requires_short_consecutive_distinct_samples(self):
+        r = self.receiver()
+        r._snapshot.armed = True
+        self.accept(r, self.message(1000000, velocity_ratio=1.50), 100.0)
+        # Duplicate source timestamps cannot confirm an excursion.
+        self.accept(r, self.message(1000000, velocity_ratio=1.60), 100.3)
+        self.assertEqual(r.snapshot().estimator_velocity_ratio_bad_samples, 1)
+        self.assertEqual(r.snapshot().navigation_fault, '')
+        self.accept(r, self.message(1200000, velocity_ratio=1.30), 100.3)
+        t = r.snapshot()
+        self.assertTrue(t.estimator_velocity_ratio_confirmed_bad)
+        self.assertIn('> 1', t.navigation_fault)
+
+    def test_velocity_ratio_healthy_sample_resets_pending_excursion(self):
+        r = self.receiver()
+        r._snapshot.armed = True
+        self.accept(r, self.message(1000000, velocity_ratio=1.50), 100.0)
+        self.accept(r, self.message(1200000, velocity_ratio=0.80), 100.3)
+        t = r.snapshot()
+        self.assertEqual(t.estimator_velocity_ratio_bad_samples, 0)
+        self.assertFalse(t.estimator_velocity_ratio_confirmed_bad)
+        self.assertEqual(t.navigation_fault, '')
+        self.accept(r, self.message(1400000, velocity_ratio=1.40), 100.6)
+        self.assertEqual(r.snapshot().estimator_velocity_ratio_bad_samples, 1)
+        self.assertEqual(r.snapshot().navigation_fault, '')
+
+    def test_primary_ekf_change_status_is_immediate_even_without_ratio_confirmation(self):
+        r = self.receiver()
+        r._snapshot.armed = True
+        message = SimpleNamespace(
+            get_type=lambda: 'STATUSTEXT',
+            get_srcSystem=lambda: 1,
+            get_srcComponent=lambda: 1,
+            text=b'Primary EKF changed 0 (filter fault)\0',
+            severity=4,
+        )
+        self.accept(r, message, 100.0)
+        self.assertIn('Primary EKF changed', r.snapshot().navigation_fault)
 
     def test_all_missing_evidence_visible_even_with_other_failure(self):
         t = TelemetrySnapshot()

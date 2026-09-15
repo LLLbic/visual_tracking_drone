@@ -6,6 +6,7 @@ fails closed. ESTIMATOR_STATUS/quality alone must never synthesize that evidence
 from dataclasses import dataclass
 from math import cos, sin, hypot, isfinite, radians, atan2
 from secrets import token_urlsafe
+from typing import Callable
 
 from .navigation_health import navigation_block_reason, estimator_ratio_reason
 from .types import TelemetrySnapshot
@@ -19,6 +20,7 @@ class HandoffFault(ValueError):
 class HandoffLimits:
     stable_seconds: float = 3.0
     max_tick_gap: float = 0.25
+    max_position_sample_gap: float = 0.25
     input_timeout: float = 0.4
     horizontal_error: float = 0.15
     vertical_error: float = 0.15
@@ -202,7 +204,9 @@ class ContinuousReference:
 
 
 class SmoothHandoff:
-    def __init__(self, target, ground_z, origin_xy, radius, limits=None, frame_signature=None):
+    def __init__(self, target, ground_z, origin_xy, radius, limits=None, frame_signature=None,
+                 health_check: Callable[[TelemetrySnapshot, float], str] | None = None,
+                 require_reset_evidence: bool = True):
         self.limits = limits or HandoffLimits()
         self.target = tuple(target)
         self.ground_z, self.origin_xy, self.radius = ground_z, origin_xy, radius
@@ -220,6 +224,8 @@ class SmoothHandoff:
         self.last_sample_received = None
         self.samples = 0
         self.signature = frame_signature
+        self._health_check = health_check or detailed_health_reason
+        self._require_reset_evidence = require_reset_evidence
         self.reference = None
         self.reason = "等待悬停及完整定位证据"
         self.terminal = False
@@ -277,16 +283,17 @@ class SmoothHandoff:
 
     def check_frame(self, t, now):
         """Called before every position packet, including prestream and hover."""
-        reason = reset_evidence_reason(t,now)
+        reason = reset_evidence_reason(t,now) if self._require_reset_evidence else ""
         if self.terminal:
             raise HandoffFault(self.reason)
         if reason or (self.signature is not None and self.signature != t.estimator_reset_signature):
             self.cancel(reason or "估计器实例或重置计数变化，旧坐标目标作废")
             raise HandoffFault(self.reason)
-        self.signature = t.estimator_reset_signature
+        if self._require_reset_evidence:
+            self.signature = t.estimator_reset_signature
 
     def health_reason(self, t, now):
-        reason = detailed_health_reason(t, now)
+        reason = self._health_check(t, now)
         if reason:
             return reason
         if t.armed is not True or t.landed_state != "IN_AIR" or t.flight_mode.upper() != "OFFBOARD":
@@ -304,12 +311,12 @@ class SmoothHandoff:
         # Source time also rejects old buffered samples delivered in a burst.
         distinct = t.local_position_sample_id != self.last_sample
         sample_gap = (t.last_distinct_position_monotonic is None
-                      or not 0 <= now-t.last_distinct_position_monotonic <= self.limits.max_tick_gap)
+                      or not 0 <= now-t.last_distinct_position_monotonic <= self.limits.max_position_sample_gap)
         if distinct and self.last_sample is not None and type(t.local_position_sample_id) is int:
             source_dt = ((t.local_position_sample_id-self.last_sample)&0xFFFFFFFF)/1000.0
-            sample_gap = sample_gap or not 0 < source_dt <= self.limits.max_tick_gap
+            sample_gap = sample_gap or not 0 < source_dt <= self.limits.max_position_sample_gap
             if self.last_sample_received is not None and t.last_distinct_position_monotonic is not None:
-                sample_gap = sample_gap or not 0 < t.last_distinct_position_monotonic-self.last_sample_received <= self.limits.max_tick_gap
+                sample_gap = sample_gap or not 0 < t.last_distinct_position_monotonic-self.last_sample_received <= self.limits.max_position_sample_gap
         if distinct:
             self.last_sample_received = t.last_distinct_position_monotonic
         if self.reference is not None and (reason or gap or sample_gap):
@@ -350,7 +357,7 @@ class SmoothHandoff:
             if not browser_ok:details.append("网页须保持前台、现场确认且输入报告新鲜")
             if not self.keys_released or any(self.axes):details.append("请松开全部按键")
             if gap:details.append("稳定观测曾中断，重新计时")
-            if sample_gap:details.append("真实位置样本间隔超过250毫秒，重新计时")
+            if sample_gap:details.append(f"真实位置样本间隔超过{self.limits.max_position_sample_gap:.2f}秒，重新计时")
             self.reason = reason or "；".join(details) or "轨迹尚未停止，等待减速完成"
         else:
             if self.good_since is None:

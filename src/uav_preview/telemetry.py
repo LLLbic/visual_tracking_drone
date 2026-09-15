@@ -13,6 +13,15 @@ from .navigation_health import estimator_ratio_reason
 from .flow_health import FlowMonitor
 
 
+# Velocity innovation rejection is noisy enough that one forwarded sample must
+# not permanently latch navigation.  Two distinct samples, separated in time
+# but still close enough to be the same excursion, are required.  Estimator
+# source-time rollback and local-frame jumps remain immediate faults below.
+_VELOCITY_RATIO_CONFIRM_SAMPLES = 2
+_VELOCITY_RATIO_CONFIRM_MIN_SECONDS = 0.15
+_VELOCITY_RATIO_CONFIRM_MAX_GAP_SECONDS = 1.0
+
+
 def _estimator_ratio(value: object) -> tuple[float | None, str]:
     if value is None:
         return None, "missing"
@@ -131,11 +140,22 @@ class PassiveMavlinkReceiver:
 
     def __init__(self, config: TelemetryConfig) -> None:
         self.config = config
-        self._flow = FlowMonitor(config.flow_minimum_quality, config.flow_sensor_id, config.flow_message_type)
+        self._flow = FlowMonitor(
+            config.flow_minimum_quality,
+            config.flow_sensor_id,
+            config.flow_message_type,
+            config.flow_quality_authoritative,
+        )
         # Hardware's mavlink status identifies the internal sensor as 0/158.
         # If forwarded to the radio, inspect it without trusting it as FC state.
-        self._peripheral_flow = FlowMonitor(config.flow_minimum_quality, config.flow_sensor_id, config.flow_message_type)
+        self._peripheral_flow = FlowMonitor(
+            config.flow_minimum_quality,
+            config.flow_sensor_id,
+            config.flow_message_type,
+            False,
+        )
         self._snapshot = TelemetrySnapshot(
+            flow_quality_authoritative=config.flow_quality_authoritative,
             flow_minimum_quality=config.flow_minimum_quality,
             qgc_forward_enabled=config.forward_qgc,
             qgc_forward_endpoint=(
@@ -179,6 +199,54 @@ class PassiveMavlinkReceiver:
         with self._lock:
             self._snapshot.error = message
         self._ready.set()
+
+    @staticmethod
+    def _update_velocity_ratio_evidence(
+        state: TelemetrySnapshot, now: float
+    ) -> str:
+        """Return a confirmed velocity-ratio fault, never a one-packet spike."""
+
+        ratio = state.estimator_velocity_ratio
+        if ratio is None:
+            state.estimator_velocity_ratio_bad_samples = 0
+            state.estimator_velocity_ratio_bad_since_monotonic = None
+            state.estimator_velocity_ratio_last_bad_monotonic = None
+            state.estimator_velocity_ratio_confirmed_bad = False
+            return ""
+        if ratio < 0:
+            state.estimator_velocity_ratio_bad_samples = 0
+            state.estimator_velocity_ratio_bad_since_monotonic = None
+            state.estimator_velocity_ratio_last_bad_monotonic = None
+            state.estimator_velocity_ratio_confirmed_bad = False
+            return estimator_ratio_reason(ratio, "速度")
+        if ratio <= 1:
+            state.estimator_velocity_ratio_bad_samples = 0
+            state.estimator_velocity_ratio_bad_since_monotonic = None
+            state.estimator_velocity_ratio_last_bad_monotonic = None
+            state.estimator_velocity_ratio_confirmed_bad = False
+            return ""
+
+        last = state.estimator_velocity_ratio_last_bad_monotonic
+        if (
+            last is None
+            or now < last
+            or now - last > _VELOCITY_RATIO_CONFIRM_MAX_GAP_SECONDS
+        ):
+            state.estimator_velocity_ratio_bad_samples = 1
+            state.estimator_velocity_ratio_bad_since_monotonic = now
+        else:
+            state.estimator_velocity_ratio_bad_samples += 1
+        state.estimator_velocity_ratio_last_bad_monotonic = now
+        since = state.estimator_velocity_ratio_bad_since_monotonic
+        state.estimator_velocity_ratio_confirmed_bad = bool(
+            since is not None
+            and state.estimator_velocity_ratio_bad_samples
+            >= _VELOCITY_RATIO_CONFIRM_SAMPLES
+            and now - since >= _VELOCITY_RATIO_CONFIRM_MIN_SECONDS
+        )
+        if state.estimator_velocity_ratio_confirmed_bad:
+            return estimator_ratio_reason(ratio, "速度")
+        return ""
 
     def _run(self) -> None:
         try:
@@ -326,20 +394,21 @@ class PassiveMavlinkReceiver:
                 raw_position_ratio = getattr(message, "pos_horiz_ratio", None)
                 state.estimator_position_ratio_is_nan = isinstance(raw_position_ratio, (float, int)) and isnan(raw_position_ratio)
                 state.last_estimator_monotonic = now
+                velocity_reason = self._update_velocity_ratio_evidence(state, now)
                 if state.armed is True:
                     if state.estimator_flags & 15 != 15 or state.estimator_flags & (128 | 1024 | 2048):
                         state.navigation_fault = "飞行中估计器有效性异常，请飞手接管"
                     else:
-                        for label, ratio in (("速度", state.estimator_velocity_ratio), ("水平位置", state.estimator_position_ratio)):
-                            # Unavailable evidence is not an observed sensor failure.
-                            # Strict navigation still refuses it in its own gate;
-                            # fixed-hover checks PX4's relative estimate separately.
-                            if ratio is None:
-                                continue
-                            reason = estimator_ratio_reason(ratio, label)
+                        # A negative velocity ratio is invalid immediately;
+                        # >1 needs the consecutive-sample confirmation above.
+                        if velocity_reason:
+                            state.navigation_fault = "飞行中" + velocity_reason + "，请飞手接管"
+                        elif state.estimator_position_ratio is not None:
+                            reason = estimator_ratio_reason(
+                                state.estimator_position_ratio, "水平位置"
+                            )
                             if reason:
                                 state.navigation_fault = "飞行中" + reason + "，请飞手接管"
-                                break
             elif message_type in {"OPTICAL_FLOW", "OPTICAL_FLOW_RAD"}:
                 sample, error = self._flow.accept(message, now)
                 if sample is not None:

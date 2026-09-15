@@ -15,10 +15,12 @@ class FlowSample:
 
 
 class FlowMonitor:
-    def __init__(self, minimum_quality=100, sensor_id=0, message_type="OPTICAL_FLOW_RAD"):
+    def __init__(self, minimum_quality=100, sensor_id=0, message_type="OPTICAL_FLOW_RAD",
+                 quality_authoritative=False):
         self.minimum_quality = minimum_quality
         self.sensor_id = sensor_id
         self.message_type = message_type
+        self.quality_authoritative = quality_authoritative
         self.samples = {}
         self.good_since = None
         self.good_samples = 0
@@ -70,7 +72,12 @@ class FlowMonitor:
         if gap is not None and 0 < gap <= 10:
             rate = min(100.,1/gap)
             self.rate_hz = rate if self.rate_hz is None else .65*self.rate_hz+.35*rate
-        if quality < self.minimum_quality:
+        if not self.quality_authoritative:
+            # Preserve the raw byte for diagnostics, but never turn a known
+            # placeholder into a flight fault or a false "good" streak.
+            self.good_since, self.good_samples, self.last_bad = None, 0, None
+            self.last_error = ""
+        elif quality < self.minimum_quality:
             self.good_since, self.good_samples, self.last_bad = None, 0, now
             self.last_error = f"光流质量 {quality} 低于本地授权门槛 {self.minimum_quality}"
         else:
@@ -89,4 +96,5 @@ class FlowMonitor:
             'integration_time_us': sample.integration_us,
             'ground_distance_m': sample.ground_distance_m,
             'selected': source == self.selected,
+            'quality_authoritative': self.quality_authoritative,
         } for source,sample in self.samples.items()}

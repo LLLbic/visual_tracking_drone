@@ -100,7 +100,11 @@ class TelemetryConfig:
     qgc_port: int = 14550
     flow_message_type: str = "OPTICAL_FLOW_RAD"
     flow_sensor_id: int = 0
-    flow_minimum_quality: int = 100  # Local engineering gate; NOT a PX4 parameter.
+    # Some radio/camera adapters populate MAVLink ``quality`` with a constant
+    # placeholder.  It must be explicitly proven authoritative before it may
+    # participate in a control gate.
+    flow_quality_authoritative: bool = False
+    flow_minimum_quality: int = 100  # Used only when the source is authoritative.
 
     def __post_init__(self) -> None:
         if self.allowed_source_ips is None:
@@ -261,6 +265,10 @@ class LocalOffboardTakeoffConfig:
     liftoff_timeout_seconds: float = 8.0
     climb_timeout_seconds: float = 20.0
     climb_rate_m_s: float = 0.30
+    # The scheduled climb target may never run farther ahead of measured
+    # relative height than this.  It bounds position-controller demand if the
+    # aircraft does not climb as quickly as the time ramp expects.
+    max_climb_setpoint_lead_m: float = 0.25
     hover_stable_seconds: float = 2.0
     height_tolerance_m: float = 0.15
     vertical_speed_tolerance_m_s: float = 0.20
@@ -467,6 +475,8 @@ def load_config(path: str | Path) -> AppConfig:
         raise ValueError("telemetry.flow_message_type must be a known raw flow message")
     if type(telemetry.flow_sensor_id) is not int or not 0 <= telemetry.flow_sensor_id <= 255:
         raise ValueError("telemetry.flow_sensor_id must be a uint8")
+    if type(telemetry.flow_quality_authoritative) is not bool:
+        raise ValueError("telemetry.flow_quality_authoritative must be a boolean")
     if type(telemetry.flow_minimum_quality) is not int or not 1 <= telemetry.flow_minimum_quality <= 255:
         raise ValueError("telemetry.flow_minimum_quality must be within 1..255")
     if not 1 <= position_stream.uplink_port <= 65535:
@@ -635,10 +645,20 @@ def load_config(path: str | Path) -> AppConfig:
     )
     if type(local_takeoff.keyboard_handoff_enabled) is not bool:
         raise ValueError("local_offboard_takeoff.keyboard_handoff_enabled must be a boolean")
-    if local_takeoff.navigation_profile not in {"detailed", "px4_fixed_hover"}:
-        raise ValueError("local_offboard_takeoff.navigation_profile must be detailed or px4_fixed_hover")
+    if local_takeoff.navigation_profile not in {"detailed", "px4_fixed_hover", "px4_position_keyboard"}:
+        raise ValueError(
+            "local_offboard_takeoff.navigation_profile must be detailed, "
+            "px4_fixed_hover or px4_position_keyboard"
+        )
     if local_takeoff.navigation_profile == "px4_fixed_hover" and local_takeoff.keyboard_handoff_enabled:
         raise ValueError("px4_fixed_hover forbids keyboard handoff")
+    if local_takeoff.navigation_profile == "px4_position_keyboard" and not local_takeoff.keyboard_handoff_enabled:
+        raise ValueError("px4_position_keyboard requires keyboard handoff")
+    if local_takeoff.navigation_profile == "px4_position_keyboard" and keyboard.available:
+        raise ValueError(
+            "px4_position_keyboard requires keyboard_control.available=false; "
+            "the legacy BODY_NED velocity sender must remain disabled"
+        )
     if abs(local_takeoff.min_height_m - 1.0) > 1e-9:
         raise ValueError("local_offboard_takeoff.min_height_m must remain exactly 1.0 m")
     if abs(local_takeoff.max_height_m - 3.0) > 1e-9:
@@ -659,6 +679,7 @@ def load_config(path: str | Path) -> AppConfig:
         "liftoff_timeout_seconds",
         "climb_timeout_seconds",
         "climb_rate_m_s",
+        "max_climb_setpoint_lead_m",
         "hover_stable_seconds",
         "height_tolerance_m",
         "vertical_speed_tolerance_m_s",
@@ -674,6 +695,10 @@ def load_config(path: str | Path) -> AppConfig:
         raise ValueError("local_offboard_takeoff.frequency_hz must be between 5 and 20 Hz")
     if local_takeoff.prestream_seconds < 1.0:
         raise ValueError("local_offboard_takeoff.prestream_seconds must be at least 1 second")
+    if not 0.10 <= local_takeoff.max_climb_setpoint_lead_m <= 0.50:
+        raise ValueError(
+            "local_offboard_takeoff.max_climb_setpoint_lead_m must be between 0.10 and 0.50 m"
+        )
     if local_takeoff.preflight_max_tilt_deg > local_takeoff.max_tilt_deg:
         raise ValueError(
             "local_offboard_takeoff.preflight_max_tilt_deg must not exceed max_tilt_deg"

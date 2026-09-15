@@ -125,11 +125,12 @@ class TakeoffOnlyTests(unittest.TestCase):
         self.f.telemetry.flow_fusion_instance = 1
         self.f._advance(.1)
         self.c.poll_once()
-        self.assertFalse(self.c.snapshot()["active"])
+        self.assertTrue(self.c.snapshot()["active"])
+        self.assertEqual(self.c.snapshot()["phase"], "LANDING")
         self.assertIn("重置计数变化", self.c.snapshot()["error"])
         self.f._elapse(1.0)
         self.assertEqual(len(self.f.sock.sent), count)
-        self.assertEqual(self.f.actions.land_calls, 0)
+        self.assertEqual(self.f.actions.land_calls, 1)
 
     def test_flow_failure_in_hold_does_not_continue_sending(self):
         self.f.test_reaching_height_keeps_hold_stream_active()
@@ -137,7 +138,9 @@ class TakeoffOnlyTests(unittest.TestCase):
         self.f.telemetry.flow_quality = 0
         self.f._advance(.1)
         self.c.poll_once()
-        self.assertFalse(self.c.snapshot()["active"])
+        self.assertTrue(self.c.snapshot()["active"])
+        self.assertEqual(self.c.snapshot()["phase"], "LANDING")
+        self.assertEqual(self.f.actions.land_calls, 1)
         self.assertEqual(len(self.f.sock.sent), count)
 
     def test_pilot_mode_changes_still_win_over_bad_navigation_evidence(self):
@@ -161,7 +164,8 @@ class TakeoffOnlyTests(unittest.TestCase):
         self.f.telemetry.local_z_m = -1.9  # +2.15 m from captured +0.25, target +1.5
         self.f._advance(.1)
         self.c.poll_once()
-        self.assertFalse(self.c.snapshot()["active"])
+        self.assertTrue(self.c.snapshot()["active"])
+        self.assertEqual(self.c.snapshot()["phase"], "LANDING")
         self.assertEqual(self.f.actions.land_calls, 1)
 
 

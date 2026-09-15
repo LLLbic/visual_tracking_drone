@@ -86,6 +86,7 @@ class LocalOffboardTakeoffTests(unittest.TestCase):
                 liftoff_timeout_seconds=3.0,
                 climb_timeout_seconds=10.0,
                 climb_rate_m_s=0.5,
+                max_climb_setpoint_lead_m=0.25,
                 hover_stable_seconds=1.0,
             ),
             GroundOffboardTestConfig(available=True),
@@ -179,9 +180,29 @@ class LocalOffboardTakeoffTests(unittest.TestCase):
         self.telemetry.landed_state = "TAKEOFF"
         self.coordinator.poll_once()
         state = self.coordinator.snapshot()
-        self.assertAlmostEqual(state["commanded_height_m"], 0.5)
+        # The time ramp asks for 0.5 m, but the aircraft has not climbed yet;
+        # the target is therefore capped 0.25 m above measured height.
+        self.assertAlmostEqual(state["commanded_height_m"], 0.25)
         message = self._decode(self.sock.sent[-1][0])
-        self.assertAlmostEqual(message.z, -0.25, places=5)
+        self.assertAlmostEqual(message.z, 0.0, places=5)
+
+    def test_climb_target_never_leads_measured_height_beyond_limit(self) -> None:
+        self._reach_arming()
+        self.telemetry.armed = True
+        self.telemetry.last_command_ack_command = 400
+        self.telemetry.last_command_ack_result = 0
+        self.telemetry.last_command_ack_monotonic = self.clock.now
+        self.coordinator.poll_once()
+        self.telemetry.landed_state = "TAKEOFF"
+
+        for measured_height in (0.0, 0.05, 0.12, 0.20, 0.32):
+            self._advance(0.4)
+            self.telemetry.local_z_m = 0.25 - measured_height
+            self.coordinator.poll_once()
+            state = self.coordinator.snapshot()
+            self.assertLessEqual(
+                state["commanded_height_m"], measured_height + 0.25 + 1e-9
+            )
 
     def test_reaching_height_keeps_hold_stream_active(self) -> None:
         self._reach_arming()
@@ -240,6 +261,23 @@ class LocalOffboardTakeoffTests(unittest.TestCase):
         self.assertFalse(state["active"])
         self.assertEqual(self.actions.land_calls, 0)
         self.assertEqual(self.actions.disarm_calls, 0)
+
+    def test_low_rate_extended_state_has_its_own_bounded_deadline(self) -> None:
+        self.telemetry.last_extended_state_monotonic = self.clock.now - 2.0
+        self.assertTrue(self.coordinator._telemetry_fresh(self.telemetry, self.clock.now))
+        self.telemetry.last_extended_state_monotonic = self.clock.now - 2.6
+        self.assertFalse(self.coordinator._telemetry_fresh(self.telemetry, self.clock.now))
+
+    def test_attitude_rc_and_position_deadlines_remain_fast(self) -> None:
+        for field, age in (
+            ("last_attitude_monotonic", .6),
+            ("last_rc_channels_monotonic", 1.1),
+            ("last_local_position_monotonic", 1.1),
+        ):
+            with self.subTest(field=field):
+                self._touch()
+                setattr(self.telemetry, field, self.clock.now - age)
+                self.assertFalse(self.coordinator._telemetry_fresh(self.telemetry, self.clock.now))
 
     def test_latch_stops_state_machine_without_duplicate_flight_action(self) -> None:
         self.coordinator.begin(1.5)
@@ -323,7 +361,7 @@ class LocalOffboardTakeoffTests(unittest.TestCase):
         self.assertAlmostEqual(current.y, original.y)
         self.assertAlmostEqual(current.z, original.z)
 
-    def test_nonfinite_flight_data_stops_without_sending_action(self) -> None:
+    def test_nonfinite_flight_data_stops_setpoints_and_enters_controlled_land(self) -> None:
         for field in ("local_x_m", "local_y_m", "local_z_m", "vx_m_s", "vy_m_s", "vz_m_s", "roll_deg", "pitch_deg", "yaw_deg"):
             for bad in (None, float("nan"), float("inf")):
                 with self.subTest(field=field, value=bad):
@@ -333,10 +371,46 @@ class LocalOffboardTakeoffTests(unittest.TestCase):
                     setattr(self.telemetry, field, bad)
                     self._advance(0.1)
                     self.coordinator.poll_once()
-                    self.assertFalse(self.coordinator.snapshot()["active"])
+                    self.assertTrue(self.coordinator.snapshot()["active"])
+                    self.assertEqual(self.coordinator.snapshot()["phase"], "LANDING")
                     self.assertEqual(len(self.sock.sent), packets)
-                    self.assertEqual(self.actions.land_calls, 0)
+                    self.assertEqual(self.actions.land_calls, 1)
                     self.assertEqual(self.actions.disarm_calls, 0)
+
+    def test_controlled_land_completes_without_restarting_setpoints(self) -> None:
+        self._hold_for_handoff()
+        packets = len(self.sock.sent)
+        self.coordinator._safe_terminal("FAILED", "synthetic anomaly", self.telemetry)
+        self.assertEqual(self.coordinator.snapshot()["phase"], "LANDING")
+        self.assertTrue(self.coordinator.snapshot()["active"])
+        self.assertEqual(self.actions.land_calls, 1)
+
+        self.telemetry.flight_mode = "LAND"
+        self.telemetry.landed_state = "LANDING"
+        self._advance(0.2)
+        self.coordinator.poll_once()
+        self.assertEqual(len(self.sock.sent), packets)
+        self.assertEqual(self.actions.land_calls, 1)
+
+        self.telemetry.armed = False
+        self.telemetry.landed_state = "ON_GROUND"
+        self._advance(0.2)
+        self.coordinator.poll_once()
+        self.assertEqual(self.coordinator.snapshot()["phase"], "LANDED")
+        self.assertFalse(self.coordinator.snapshot()["active"])
+
+    def test_physical_ch8_immediately_overrides_controlled_land(self) -> None:
+        self._hold_for_handoff()
+        packets = len(self.sock.sent)
+        self.coordinator._safe_terminal("FAILED", "synthetic anomaly", self.telemetry)
+        self.telemetry.rc_channel_8_pwm = 1000
+        self.telemetry.flight_mode = "POSCTL"
+        self._advance(0.1)
+        self.coordinator.poll_once()
+        self.assertEqual(self.coordinator.snapshot()["phase"], "PILOT_TAKEOVER")
+        self.assertFalse(self.coordinator.snapshot()["active"])
+        self.assertEqual(len(self.sock.sent), packets)
+        self.assertEqual(self.actions.land_calls, 1)
 
     def test_pilot_mode_exit_wins_over_stale_position(self) -> None:
         self._hold_for_handoff()

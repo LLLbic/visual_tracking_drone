@@ -20,6 +20,7 @@ class TelemetrySnapshot:
     last_reset_evidence_monotonic: float | None = None
     navigation_fault: str = ""
     flow_quality: int | None = None
+    flow_quality_authoritative: bool = False
     flow_minimum_quality: int = 100
     flow_source: str = ""
     flow_hz: float | None = None
@@ -35,6 +36,13 @@ class TelemetrySnapshot:
     estimator_velocity_ratio: float | None = None
     estimator_position_ratio: float | None = None
     estimator_velocity_ratio_status: str = "missing"
+    # A velocity innovation excursion is confirmed only by consecutive,
+    # source-timestamp-distinct ESTIMATOR_STATUS samples.  This avoids turning
+    # one delayed/outlier MAVLink packet into a permanent in-flight latch.
+    estimator_velocity_ratio_bad_samples: int = 0
+    estimator_velocity_ratio_bad_since_monotonic: float | None = None
+    estimator_velocity_ratio_last_bad_monotonic: float | None = None
+    estimator_velocity_ratio_confirmed_bad: bool = False
     estimator_position_ratio_status: str = "missing"
     estimator_position_ratio_is_nan: bool = False
     estimator_hz: float | None = None
@@ -149,6 +157,10 @@ class TelemetrySnapshot:
             ("extended_state_age_seconds", "last_extended_state_monotonic"),
             ("rc_channels_age_seconds", "last_rc_channels_monotonic"),
             ("estimator_age_seconds", "last_estimator_monotonic"),
+            (
+                "estimator_velocity_ratio_bad_age_seconds",
+                "estimator_velocity_ratio_bad_since_monotonic",
+            ),
             ("flow_age_seconds", "last_flow_monotonic"),
             ("flow_last_bad_age_seconds", "last_flow_bad_monotonic"),
             ("flow_fusion_age_seconds", "last_flow_fusion_monotonic"),
@@ -169,6 +181,8 @@ class TelemetrySnapshot:
         result.pop("last_attitude_monotonic", None)
         result.pop("last_extended_state_monotonic", None)
         result.pop("last_rc_channels_monotonic", None)
+        result.pop("estimator_velocity_ratio_bad_since_monotonic", None)
+        result.pop("estimator_velocity_ratio_last_bad_monotonic", None)
         return result
 
 

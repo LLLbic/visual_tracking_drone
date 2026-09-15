@@ -41,7 +41,7 @@ class FlowEvidenceTests(unittest.TestCase):
         self.assertFalse(t.flow_sources['0/158/OPTICAL_FLOW_RAD/0']['selected'])
 
     def test_console_245_is_raw_uint8_not_percent_and_no_distance_not_zero(self):
-        f=FlowMonitor()
+        f=FlowMonitor(quality_authoritative=True)
         m=flow(1000000)
         sample,error=f.accept(m,100.)
         self.assertEqual(sample.quality,245)
@@ -57,13 +57,13 @@ class FlowEvidenceTests(unittest.TestCase):
         msg=encoder.optical_flow_rad_encode(13595537616,0,20000,-.0003,.0006,
                 math.nan,math.nan,math.nan,0,245,33333,-1.)
         parsed=mavlink2.MAVLink(None).parse_char(msg.pack(encoder))
-        sample,error=FlowMonitor().accept(parsed,100.)
+        sample,error=FlowMonitor(quality_authoritative=True).accept(parsed,100.)
         self.assertEqual(sample.quality,245)
         self.assertEqual(sample.sensor_id,0)
         self.assertEqual(error,'')
 
     def test_other_source_cannot_replace_bad_selected_source_by_higher_quality(self):
-        f=FlowMonitor()
+        f=FlowMonitor(quality_authoritative=True)
         f.accept(flow(1000,4),100.)
         self.assertIsNone(f.accept(flow(1000,245,sensor=1),100.)[0])
         self.assertIsNone(f.accept(flow(1000,245,kind='OPTICAL_FLOW'),100.)[0])
@@ -71,7 +71,7 @@ class FlowEvidenceTests(unittest.TestCase):
         self.assertEqual(len(f.diagnostics(100.)),3)
 
     def test_duplicates_do_not_refresh_or_count_and_low_sample_resets_window(self):
-        f=FlowMonitor()
+        f=FlowMonitor(quality_authoritative=True)
         for i in range(16):f.accept(flow(1000000+i*200000),100.+i*.2)
         self.assertEqual(f.good_samples,16)
         self.assertEqual(f.good_since,100.)
@@ -88,7 +88,7 @@ class FlowEvidenceTests(unittest.TestCase):
     def test_gap_bad_data_and_clock_reversal_cannot_keep_good_history(self):
         for bad in ('gap','quality','clock'):
             with self.subTest(bad=bad):
-                f=FlowMonitor()
+                f=FlowMonitor(quality_authoritative=True)
                 for i in range(20):f.accept(flow(1000000+i*200000),100.+i*.2)
                 if bad=='gap':f.accept(flow(5100000),105.)
                 elif bad=='quality':f.accept(flow(4900000,math.nan),104.)
@@ -96,7 +96,7 @@ class FlowEvidenceTests(unittest.TestCase):
                 self.assertLessEqual(f.good_samples,1)
 
     def test_failure_is_latched_while_armed_even_after_quality_recovers(self):
-        r=PassiveMavlinkReceiver(TelemetryConfig(enabled=False))
+        r=PassiveMavlinkReceiver(TelemetryConfig(enabled=False, flow_quality_authoritative=True))
         r._snapshot.armed=True
         for stamp,q in ((1000000,245),(1200000,0),(1400000,245)):
             with patch('uav_preview.telemetry.monotonic',return_value=stamp/1e6):
@@ -107,6 +107,18 @@ class FlowEvidenceTests(unittest.TestCase):
         self.assertEqual(t.flow_good_samples,1)
         self.assertIsNone(t.flow_fusion_active)
         self.assertIsNone(t.estimator_reset_signature)
+
+    def test_untrusted_placeholder_quality_is_diagnostic_not_flight_fault(self):
+        r=PassiveMavlinkReceiver(TelemetryConfig(enabled=False, flow_quality_authoritative=False))
+        r._snapshot.armed=True
+        with patch('uav_preview.telemetry.monotonic',return_value=1.):
+            r._accept(flow(1000000,4),'127.0.0.1',object())
+        t=r.snapshot()
+        self.assertEqual(t.flow_quality,4)
+        self.assertFalse(t.flow_quality_authoritative)
+        self.assertEqual(t.flow_error,'')
+        self.assertEqual(t.flow_good_samples,0)
+        self.assertFalse(t.navigation_fault)
 
 
 class RangeEvidenceTests(unittest.TestCase):

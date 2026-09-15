@@ -101,7 +101,10 @@ red_color_filter = false
 [telemetry]
 flow_message_type = "OPTICAL_FLOW_RAD"
 flow_sensor_id = 0
-# 本地授权工程门槛，未改PX4的EKF2_OF_QMIN；必须结合融合与测距证据。
+# 当前数传下行出现固定/占位quality值（例如4），未证明它对应飞控实际光流质量。
+# false时该字段仅显示，绝不参与固定悬停授权或飞行故障锁存；不修改PX4参数。
+flow_quality_authoritative = false
+# 只有上项经传感器源核验后显式改为true，本地门槛才生效。
 flow_minimum_quality = 100
 enabled = true
 bind_host = "127.0.0.1"
@@ -190,9 +193,9 @@ source_system = 245
 source_component = 191
 
 [keyboard_control]
-# 默认关闭。ARMED + ON_GROUND + OFFBOARD时只允许Shift上升；飞控报告
-# IN_AIR后才开放全部方向。实体遥控器切出OFFBOARD可立即接管。
-available = true
+# 旧版独立 BODY_NED 速度发送器。位置式键盘交接必须保持关闭，避免
+# 两个线程争用连续设定值；键盘输入由 local_offboard_takeoff 的同一发送器处理。
+available = false
 allow_ground_takeoff = false
 require_physical_offboard_switch = true
 physical_offboard_switch_pwm_min = 1800
@@ -232,10 +235,10 @@ position_stale_seconds = 1.0
 # “当前高度 + 目标高度”。到达后继续发送定点保持，直至飞手切回Position
 # 或点击受控退出。它不修改PX4参数、不自动切模式、不发送RC覆盖。
 available = true
-# 当前仅验证起飞/悬停；前后端均禁止键盘交接，不影响必要的定位保护。
-keyboard_handoff_enabled = false
-# 旧版纯位置起飞/悬停基线。依赖PX4有效定位输出；未下传的详细EKF数据仅诊断。
-navigation_profile = "px4_fixed_hover"
+# 位置式键盘交接：继续复用起飞/悬停的同一LOCAL_NED位置发送器；必须单独人工授权。
+keyboard_handoff_enabled = true
+# 键盘仅改变内部连续轨迹，MAVLink全程保持type_mask=2552；不启用旧BODY_NED速度TX。
+navigation_profile = "px4_position_keyboard"
 min_height_m = 1.0
 max_height_m = 3.0
 default_height_m = 1.5
@@ -246,6 +249,8 @@ arm_ack_timeout_seconds = 3.0
 liftoff_timeout_seconds = 8.0
 climb_timeout_seconds = 20.0
 climb_rate_m_s = 0.30
+# Scheduled climb target is capped this far above measured relative height.
+max_climb_setpoint_lead_m = 0.25
 hover_stable_seconds = 2.0
 height_tolerance_m = 0.15
 vertical_speed_tolerance_m_s = 0.20

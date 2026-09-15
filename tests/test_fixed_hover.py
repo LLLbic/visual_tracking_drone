@@ -19,6 +19,7 @@ class FixedHoverTests(unittest.TestCase):
         self.c, self.t = self.f.coordinator, self.f.telemetry
         self.t.flow_source = ""
         self.t.flow_quality = None
+        self.t.flow_quality_authoritative = False
         self.t.flow_good_since_monotonic = None
         self.t.flow_good_samples = 0
         self.t.flow_fusion_active = None
@@ -62,6 +63,14 @@ class FixedHoverTests(unittest.TestCase):
         self.assertIsNone(self.t.flow_fusion_active)
         self.assertIsNone(self.t.estimator_reset_signature)
 
+    def test_point_six_hz_extended_state_is_tolerated_with_bounded_jitter(self):
+        self.t.last_extended_state_monotonic = self.f.clock.now - 2.0
+        blockers, _warnings = fixed_hover_health(self.t, self.f.clock.now)
+        self.assertFalse(any("落地状态" in reason for reason in blockers))
+        self.t.last_extended_state_monotonic = self.f.clock.now - 2.6
+        blockers, _warnings = fixed_hover_health(self.t, self.f.clock.now)
+        self.assertTrue(any("落地状态" in reason for reason in blockers))
+
     def test_complete_sequence_uses_only_original_position_and_never_handoffs(self):
         self.reach_hold()
         self.f._elapse(5)
@@ -104,7 +113,7 @@ class FixedHoverTests(unittest.TestCase):
             ('estimator_flags',15), ('estimator_flags',15|32|128), ('estimator_flags',32|256),
             ('last_estimator_monotonic',98.), ('last_heartbeat_monotonic',98.),
             ('local_x_m',math.nan), ('vz_m_s',math.inf), ('last_distinct_position_monotonic',98.),
-            ('estimator_velocity_ratio',None), ('estimator_velocity_ratio',1.01),
+            ('estimator_velocity_ratio',None),
             ('estimator_position_ratio',1.1), ('estimator_position_ratio_is_nan',False),
             ('rc_channel_6_pwm',None), ('navigation_fault','real fault'),
         ):
@@ -114,9 +123,23 @@ class FixedHoverTests(unittest.TestCase):
                 self.assertEqual(self.f.sock.sent,[])
                 self.assertEqual(self.f.actions.arm_calls,0)
 
+        self.setUp()
+        self.t.estimator_velocity_ratio = 1.01
+        self.t.estimator_velocity_ratio_bad_samples = 2
+        self.t.estimator_velocity_ratio_confirmed_bad = True
+        with self.assertRaises(ValueError):
+            self.c.begin(1.5)
+
+    def test_single_velocity_ratio_excursion_is_warning_not_blocker(self):
+        self.t.estimator_velocity_ratio = 1.01
+        self.t.estimator_velocity_ratio_bad_samples = 1
+        blockers, warnings = fixed_hover_health(self.t, self.f.clock.now)
+        self.assertEqual(blockers, [])
+        self.assertTrue(any('短时超限' in warning for warning in warnings))
+
     def test_optional_observed_failure_is_not_hidden(self):
         for changes in (
-            dict(flow_source='1/1/OPTICAL_FLOW_RAD/0',flow_quality=0),
+            dict(flow_source='1/1/OPTICAL_FLOW_RAD/0',flow_quality=0,flow_quality_authoritative=True),
             dict(flow_error='source backwards'),dict(flow_fusion_active=False),
             dict(flow_innovation_rejected=True),dict(estimator_dead_reckoning=True),
             dict(flow_innovation_x_ratio=17.3),dict(laser_height_m=99),
@@ -124,22 +147,46 @@ class FixedHoverTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.setUp();self.reach_hold();before=len(self.f.sock.sent)
                 self.tick(**changes)
-                self.assertFalse(self.c.snapshot()['active'])
+                self.assertTrue(self.c.snapshot()['active'])
+                self.assertEqual(self.c.snapshot()['phase'], 'LANDING')
+                self.assertEqual(self.f.actions.land_calls, 1)
                 self.assertEqual(len(self.f.sock.sent),before)
                 self.f._elapse(.5)
                 self.assertEqual(len(self.f.sock.sent),before)
+
+    def test_untrusted_placeholder_quality_never_blocks_fixed_hover(self):
+        self.t.flow_source = '1/1/OPTICAL_FLOW_RAD/0'
+        self.t.flow_quality = 4
+        self.t.last_flow_monotonic = self.f.clock.now
+        blockers, warnings = fixed_hover_health(self.t, self.f.clock.now)
+        self.assertEqual(blockers, [])
+        self.assertTrue(any('占位值' in warning and '不参与' in warning for warning in warnings))
+        self.reach_hold()
+        before = len(self.f.sock.sent)
+        self.tick(flow_quality=4)
+        self.assertTrue(self.c.snapshot()['active'])
+        self.assertEqual(len(self.f.sock.sent), before + 1)
 
     def test_coordinate_heading_and_source_changes_invalidate_original_target(self):
         for changes in (
             dict(local_y_m=-1.75),dict(local_z_m=-1.5),dict(yaw_deg=50),
             dict(estimator_reset_signature=(0,1,1,1,1,1)),
-            dict(component_id=2),dict(local_position_sample_id=1),
+            dict(local_position_sample_id=1),
         ):
             with self.subTest(changes=changes):
                 self.setUp();self.reach_hold();before=len(self.f.sock.sent)
                 self.tick(**changes)
-                self.assertFalse(self.c.snapshot()['active'])
+                self.assertTrue(self.c.snapshot()['active'])
+                self.assertEqual(self.c.snapshot()['phase'], 'LANDING')
+                self.assertEqual(self.f.actions.land_calls, 1)
                 self.assertEqual(len(self.f.sock.sent),before)
+
+        self.setUp(); self.reach_hold(); before = len(self.f.sock.sent)
+        self.tick(component_id=2)
+        self.assertFalse(self.c.snapshot()['active'])
+        self.assertEqual(self.c.snapshot()['phase'], 'FAILED')
+        self.assertEqual(self.f.actions.land_calls, 0)
+        self.assertEqual(len(self.f.sock.sent), before)
 
     def test_small_drift_never_recaptures_hover_anchor(self):
         self.reach_hold()
@@ -172,6 +219,7 @@ class FixedHoverTests(unittest.TestCase):
         self.f._elapse(1.)
         self.assertEqual(self.f.actions.land_calls,1)
         self.assertEqual(len(self.f.sock.sent),before)
+        self.assertEqual(self.c.snapshot()['phase'],'LANDING')
 
     def test_ground_motion_cancels_before_arm(self):
         self.c.begin(1.5)
